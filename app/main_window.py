@@ -45,6 +45,7 @@ TRANSLATIONS = {
         "save_session": "Save Session",
         "save_as": "Save Session As",
         "export_recordings": "Export Recordings JSON",
+        "save_reclist_to": "Save Reclist To",
         "import_reclist": "Import Reclist",
         "import_voicebank": "Import Voicebank",
         "import_bgm": "Import BGM WAV",
@@ -69,9 +70,11 @@ TRANSLATIONS = {
         "stop": "Stop",
         "rerecord": "Re-record",
         "preview_bgm": "Preview BGM",
+        "preview_overlay": "Preview Overlay",
         "bgm_during": "BGM during recording",
         "auto_next": "Auto next item",
         "bgm_level": "BGM level",
+        "bgm_overlay_level": "BGM overlay level",
         "pre_roll": "Pre-roll (ms)",
         "cut_selection": "Cut Selection",
         "select_region": "Select Region",
@@ -134,6 +137,7 @@ TRANSLATIONS = {
         "save_session": "Сохранить сессию",
         "save_as": "Сохранить как",
         "export_recordings": "Экспорт записей JSON",
+        "save_reclist_to": "Сохранить реклист как",
         "import_reclist": "Импорт реклиста",
         "import_voicebank": "Импорт voicebank",
         "import_bgm": "Импорт BGM WAV",
@@ -158,9 +162,11 @@ TRANSLATIONS = {
         "stop": "Стоп",
         "rerecord": "Перезапись",
         "preview_bgm": "Прослушать BGM",
+        "preview_overlay": "Прослушать оверлей",
         "bgm_during": "BGM при записи",
         "auto_next": "Автопереход",
         "bgm_level": "Уровень BGM",
+        "bgm_overlay_level": "Уровень оверлея",
         "pre_roll": "Предролл (мс)",
         "cut_selection": "Вырезать выделение",
         "select_region": "Выделить участок",
@@ -223,6 +229,7 @@ TRANSLATIONS = {
         "save_session": "セッションを保存",
         "save_as": "名前を付けて保存",
         "export_recordings": "録音一覧JSONを書き出し",
+        "save_reclist_to": "レコリストを書き出し",
         "import_reclist": "レコリストをインポート",
         "import_voicebank": "音源をインポート",
         "import_bgm": "BGM WAVをインポート",
@@ -247,9 +254,11 @@ TRANSLATIONS = {
         "stop": "停止",
         "rerecord": "再録音",
         "preview_bgm": "BGMプレビュー",
+        "preview_overlay": "オーバーレイプレビュー",
         "bgm_during": "録音中BGM",
         "auto_next": "自動で次へ",
         "bgm_level": "BGMレベル",
+        "bgm_overlay_level": "BGMオーバーレイ",
         "pre_roll": "プリロール (ms)",
         "cut_selection": "選択範囲を削除",
         "select_region": "範囲を選択",
@@ -693,6 +702,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui_theme = self.settings.value("ui_theme", "light")
         self.recent_sessions: list[str] = list(self.settings.value("recent_sessions", []))
         self.setWindowTitle(tr(self.ui_language, "app_title"))
+        icon_path = Path(__file__).resolve().parent.parent / "icon" / "icon.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QtGui.QIcon(str(icon_path)))
+
 
         self.session: Optional[Session] = None
         self.current_item: Optional[Item] = None
@@ -772,6 +785,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn = QtWidgets.QPushButton(tr(self.ui_language, "stop"))
         self.rerecord_btn = QtWidgets.QPushButton(tr(self.ui_language, "rerecord"))
         self.preview_btn = QtWidgets.QPushButton(tr(self.ui_language, "preview_bgm"))
+        self.preview_overlay_btn = QtWidgets.QPushButton(tr(self.ui_language, "preview_overlay"))
         self.cut_btn = QtWidgets.QPushButton(tr(self.ui_language, "cut_selection"))
         self.select_btn = QtWidgets.QPushButton(tr(self.ui_language, "select_region"))
 
@@ -780,7 +794,10 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_layout.addWidget(self.stop_btn)
         btn_layout.addWidget(self.rerecord_btn)
         right_layout.addLayout(btn_layout)
-        right_layout.addWidget(self.preview_btn)
+        preview_row = QtWidgets.QHBoxLayout()
+        preview_row.addWidget(self.preview_btn)
+        preview_row.addWidget(self.preview_overlay_btn)
+        right_layout.addLayout(preview_row)
         select_cut_layout = QtWidgets.QHBoxLayout()
         select_cut_layout.addWidget(self.select_btn)
         select_cut_layout.addWidget(self.cut_btn)
@@ -797,8 +814,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bgm_slider.setRange(0, 100)
         self.bgm_slider.setValue(50)
         self.bgm_level_label = QtWidgets.QLabel(tr(self.ui_language, "bgm_level"))
-        right_layout.addWidget(self.bgm_level_label)
-        right_layout.addWidget(self.bgm_slider)
+        self.bgm_overlay_label = QtWidgets.QLabel(tr(self.ui_language, "bgm_overlay_level"))
+        level_row = QtWidgets.QHBoxLayout()
+        level_row.addWidget(self.bgm_level_label)
+        level_row.addWidget(self.bgm_slider, 1)
+
+        self.bgm_overlay_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.bgm_overlay_slider.setRange(0, 100)
+        self.bgm_overlay_slider.setValue(50)
+        level_row.addWidget(self.bgm_overlay_label)
+        level_row.addWidget(self.bgm_overlay_slider, 1)
+        right_layout.addLayout(level_row)
 
         self.pre_roll_spin = QtWidgets.QSpinBox()
         self.pre_roll_spin.setRange(0, 2000)
@@ -891,6 +917,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_action = self.file_menu.addAction(tr(self.ui_language, "save_session"))
         self.save_as_action = self.file_menu.addAction(tr(self.ui_language, "save_as"))
         self.export_action = self.file_menu.addAction(tr(self.ui_language, "export_recordings"))
+        self.save_reclist_action = self.file_menu.addAction(tr(self.ui_language, "save_reclist_to"))
         self.file_menu.addSeparator()
         self.recent_menu = self.file_menu.addMenu(tr(self.ui_language, "recent_sessions"))
         self._rebuild_recent_menu()
@@ -915,6 +942,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_action.triggered.connect(self._save_session)
         self.save_as_action.triggered.connect(self._save_as_session)
         self.export_action.triggered.connect(self._export_recordings)
+        self.save_reclist_action.triggered.connect(self._save_reclist_as)
 
         self.import_reclist_action.triggered.connect(self._import_reclist)
         self.import_voicebank_action.triggered.connect(self._import_voicebank)
@@ -931,10 +959,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.clicked.connect(self._stop)
         self.rerecord_btn.clicked.connect(self._rerecord)
         self.preview_btn.clicked.connect(self._toggle_preview)
+        self.preview_overlay_btn.clicked.connect(self._toggle_preview_overlay)
         self.cut_btn.clicked.connect(self._cut_selection)
         self.select_btn.clicked.connect(self._toggle_selection)
 
         self.bgm_slider.valueChanged.connect(self._update_bgm_level)
+        self.bgm_overlay_slider.valueChanged.connect(self._update_bgm_overlay_level)
         self.pre_roll_spin.valueChanged.connect(self._update_pre_roll)
 
     def _new_session(self) -> None:
@@ -1184,6 +1214,24 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._show_error(str(exc))
 
+    def _save_reclist_as(self) -> None:
+        if not self.session:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Reclist", "reclist.txt", "Text Files (*.txt)")
+        if not path:
+            return
+        try:
+            lines = []
+            for item in self.session.items:
+                if item.note:
+                    lines.append(f"{item.alias}\\t{item.note}")
+                else:
+                    lines.append(item.alias)
+            Path(path).write_text("\\n".join(lines), encoding="utf-8")
+            self._set_status("Reclist saved")
+        except Exception as exc:
+            self._show_error(str(exc))
+
     def _restore_session_assets(self) -> None:
         if not self.session:
             return
@@ -1395,6 +1443,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_language(self) -> None:
         self.setWindowTitle(tr(self.ui_language, "app_title"))
+        icon_path = Path(__file__).resolve().parent.parent / "icon" / "icon.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QtGui.QIcon(str(icon_path)))
+
         self.file_menu.setTitle(tr(self.ui_language, "file"))
         self.import_menu.setTitle(tr(self.ui_language, "import"))
         self.settings_menu.setTitle(tr(self.ui_language, "settings"))
@@ -1405,6 +1457,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_action.setText(tr(self.ui_language, "save_session"))
         self.save_as_action.setText(tr(self.ui_language, "save_as"))
         self.export_action.setText(tr(self.ui_language, "export_recordings"))
+        self.save_reclist_action.setText(tr(self.ui_language, "save_reclist_to"))
         self.recent_menu.setTitle(tr(self.ui_language, "recent_sessions"))
         self.import_reclist_action.setText(tr(self.ui_language, "import_reclist"))
         self.import_voicebank_action.setText(tr(self.ui_language, "import_voicebank"))
@@ -1429,11 +1482,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.setText(tr(self.ui_language, "stop"))
         self.rerecord_btn.setText(tr(self.ui_language, "rerecord"))
         self.preview_btn.setText(tr(self.ui_language, "preview_bgm"))
+        self.preview_overlay_btn.setText(tr(self.ui_language, "preview_overlay"))
         self.cut_btn.setText(tr(self.ui_language, "cut_selection"))
         self.select_btn.setText(tr(self.ui_language, "select_region"))
         self.bgm_checkbox.setText(tr(self.ui_language, "bgm_during"))
         self.auto_next_checkbox.setText(tr(self.ui_language, "auto_next"))
         self.bgm_level_label.setText(tr(self.ui_language, "bgm_level"))
+        self.bgm_overlay_label.setText(tr(self.ui_language, "bgm_overlay_level"))
         self.pre_roll_label.setText(tr(self.ui_language, "pre_roll"))
 
         self.table.setHorizontalHeaderLabels([
@@ -1543,8 +1598,10 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             if self.audio.preview:
                 self.audio.stop_bgm()
+                self.audio.set_overlay_enabled(True)
             else:
                 self._stop_playback()
+                self.audio.set_overlay_enabled(False)
                 if (
                     self.current_item
                     and self.session
@@ -1554,6 +1611,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 ):
                     self.audio.load_bgm_wav(self.voicebank_samples[self.current_item.alias])
                 self.audio.play_bgm()
+        except Exception as exc:
+            self._show_error(str(exc))
+
+    def _toggle_preview_overlay(self) -> None:
+        try:
+            if self.audio.preview:
+                self.audio.stop_bgm()
+                self.audio.set_overlay_enabled(True)
+                return
+            self._stop_playback()
+            if self.audio._bgm_overlay is None or getattr(self.audio._bgm_overlay, "size", 0) == 0:
+                self._show_error("No overlay BGM set")
+                return
+            self.audio._bgm_data = np.zeros(int(self.audio.sample_rate * 2), dtype=np.float32)
+            self.audio._bgm_pos = 0
+            self.audio._bgm_overlay_pos = 0
+            self.audio.set_overlay_enabled(True)
+            self.audio.play_bgm()
         except Exception as exc:
             self._show_error(str(exc))
 
@@ -1589,6 +1664,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_bgm_level(self) -> None:
         self.audio.set_bgm_gain(self.bgm_slider.value() / 100.0)
+
+    def _update_bgm_overlay_level(self) -> None:
+        self.audio.set_overlay_gain(self.bgm_overlay_slider.value() / 100.0)
 
     def _update_pre_roll(self) -> None:
         self.audio.set_pre_roll_ms(self.pre_roll_spin.value())

@@ -11,3 +11,4 @@ Thumbs.db
 *.log
 *.tmp
 recordings/
+dist/

@@ -14,6 +14,7 @@ def save_session(session: Session, path: Optional[Path] = None) -> Path:
     session_dir = path if path else session.session_dir()
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "Recordings").mkdir(parents=True, exist_ok=True)
+    _write_character_txt(session, session_dir)
     data = session.to_dict()
     out_path = session_dir / SESSION_FILENAME
     out_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -37,3 +38,9 @@ def export_recordings_json(session: Session, out_path: Path) -> None:
         "duration_sec": item.duration_sec,
     } for item in session.items]
     out_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _write_character_txt(session: Session, session_dir: Path) -> None:
+    name = f"{session.singer} {session.name}".strip()
+    content = f"name={name}\n" "description=Recorded by UTAU_Recorder\n"
+    (session_dir / "character.txt").write_text(content, encoding="utf-8")

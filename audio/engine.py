@@ -28,6 +28,7 @@ class AudioEngine(QtCore.QObject):
         self.preview = False
         self.bgm_during_recording = False
         self.bgm_gain = 0.5
+        self.overlay_gain = 0.5
         self.monitor_gain = 0.0
         self.pre_roll_samples = 0
 
@@ -40,6 +41,7 @@ class AudioEngine(QtCore.QObject):
         self._bgm_pos = 0
         self._bgm_overlay: Optional[np.ndarray] = None
         self._bgm_overlay_pos = 0
+        self._overlay_enabled = True
         self._record_final_path: Optional[Path] = None
         self._record_temp_path: Optional[Path] = None
         self._recorded_chunks: list[np.ndarray] = []
@@ -53,6 +55,9 @@ class AudioEngine(QtCore.QObject):
 
     def set_bgm_gain(self, value: float) -> None:
         self.bgm_gain = float(max(0.0, min(1.0, value)))
+
+    def set_overlay_gain(self, value: float) -> None:
+        self.overlay_gain = float(max(0.0, min(1.0, value)))
 
     def set_monitor_gain(self, value: float) -> None:
         self.monitor_gain = float(max(0.0, min(1.0, value)))
@@ -70,8 +75,6 @@ class AudioEngine(QtCore.QObject):
         self._bgm_playlist = [data]
         self._bgm_index = 0
         self._bgm_pos = 0
-        self._bgm_overlay = None
-        self._bgm_overlay_pos = 0
         self.status.emit(f"BGM loaded: {path.name}")
 
     def load_bgm_playlist(self, paths: list[Path]) -> None:
@@ -89,8 +92,6 @@ class AudioEngine(QtCore.QObject):
         self._bgm_index = 0
         self._bgm_data = self._bgm_playlist[0]
         self._bgm_pos = 0
-        self._bgm_overlay = None
-        self._bgm_overlay_pos = 0
         self.status.emit(f"BGM playlist loaded: {len(playlist)} files")
 
     def generate_bgm(
@@ -110,8 +111,6 @@ class AudioEngine(QtCore.QObject):
         self._bgm_playlist = [self._bgm_data]
         self._bgm_index = 0
         self._bgm_pos = 0
-        self._bgm_overlay = None
-        self._bgm_overlay_pos = 0
         self.status.emit(f"BGM generated: {note}")
 
     def generate_bgm_mora(
@@ -140,8 +139,6 @@ class AudioEngine(QtCore.QObject):
         self._bgm_playlist = [self._bgm_data]
         self._bgm_index = 0
         self._bgm_pos = 0
-        self._bgm_overlay = None
-        self._bgm_overlay_pos = 0
         self.status.emit(f"BGM generated (mora): {note}")
 
     def _tone(self, note: str, duration_sec: float) -> np.ndarray:
@@ -168,8 +165,10 @@ class AudioEngine(QtCore.QObject):
         self.status.emit(f"BGM overlay set: {note}")
 
     def clear_bgm_overlay(self) -> None:
-        self._bgm_overlay = None
-        self._bgm_overlay_pos = 0
+        self._overlay_enabled = True
+
+    def set_overlay_enabled(self, enabled: bool) -> None:
+        self._overlay_enabled = bool(enabled)
 
     def start_recording(self, out_path: Path, bgm_during: bool = True) -> None:
         if self.recording:
@@ -181,6 +180,8 @@ class AudioEngine(QtCore.QObject):
         self.recording = True
         self.preview = False
         self._bgm_pos = -self.pre_roll_samples if bgm_during else 0
+        if self._bgm_overlay is not None:
+            self._bgm_overlay_pos = 0
         self._recorded_chunks = []
         self._recorded_samples = 0
         self._recorded_cache = None
@@ -240,6 +241,8 @@ class AudioEngine(QtCore.QObject):
         self.preview = True
         self.recording = False
         self._bgm_pos = 0
+        if self._bgm_overlay is not None:
+            self._bgm_overlay_pos = 0
         self._ensure_stream()
         self.status.emit("BGM preview")
 
@@ -346,8 +349,8 @@ class AudioEngine(QtCore.QObject):
             else:
                 base = self._read_bgm(frames)
 
-        overlay = self._bgm_overlay_chunk(frames)
-        return (base + overlay) * self.bgm_gain
+        overlay = self._bgm_overlay_chunk(frames) if self._overlay_enabled else np.zeros(frames, dtype=np.float32)
+        return base * self.bgm_gain + overlay * self.overlay_gain
 
     def _read_bgm(self, frames: int) -> np.ndarray:
         if self._bgm_data is None:
