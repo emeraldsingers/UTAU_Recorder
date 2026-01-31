@@ -1,7 +1,8 @@
-UTAU VST Host (CLI)
+UTAU VST Host (CLI + GUI)
 
 This is a minimal offline VST host used by the Python UI.
-It processes audio files with a plugin chain and writes the result.
+- CLI: processes audio files with a plugin chain and writes the result.
+- GUI: opens plugin UI to tweak settings and save presets.
 
 Requirements
 - JUCE (for VST3 / AU / LV2 / LADSPA hosting)
@@ -15,9 +16,13 @@ Build (with JUCE)
 2) Build:
    cmake --build build --config Release
 
-Where to find the binary
-- Windows: build/Release/utau_vst_host.exe
-- macOS/Linux: build/utau_vst_host (or build/Release/utau_vst_host if multi-config)
+Where to find the binaries
+- Windows:
+  - build/Release/utau_vst_host.exe
+  - build/Release/utau_vst_host_gui.exe
+- macOS/Linux:
+  - build/utau_vst_host (or build/Release/utau_vst_host if multi-config)
+  - build/utau_vst_host_gui (or build/Release/utau_vst_host_gui if multi-config)
 
 Example (Windows PowerShell)
   cmake -S . -B build -DJUCE_DIR=C:\path\to\JUCE
@@ -50,5 +55,6 @@ Chain JSON format
 }
 
 Notes
-- Preset loading uses AudioProcessor::setStateInformation. Some plugin preset formats may not load.
-- The host does offline processing only. No realtime/GUI.
+- Preset loading/saving uses AudioProcessor::setStateInformation. Some plugin preset formats may not load.
+- The CLI host is offline-only. The GUI host is for editing/saving presets (not realtime audio output).
+- VST3 plugins are directories (.vst3). Use the folder path as the plugin path.

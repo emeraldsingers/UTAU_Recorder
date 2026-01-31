@@ -60,9 +60,15 @@ static bool parseArgs(const StringArray& argv, Args& args)
 
 static String resolvePath(const File& baseDir, const String& path)
 {
-    if (File::isAbsolutePath(path))
-        return File(path).getFullPathName();
-    return baseDir.getChildFile(path).getFullPathName();
+    String cleaned = path.trim();
+    if (cleaned.length() >= 2 && (cleaned.startsWithChar('\"') && cleaned.endsWithChar('\"')))
+        cleaned = cleaned.substring(1, cleaned.length() - 1).trim();
+    if (cleaned.length() >= 2 && (cleaned.startsWithChar('\'') && cleaned.endsWithChar('\'')))
+        cleaned = cleaned.substring(1, cleaned.length() - 1).trim();
+
+    if (File::isAbsolutePath(cleaned))
+        return File(cleaned).getFullPathName();
+    return baseDir.getChildFile(cleaned).getFullPathName();
 }
 
 static bool loadChain(const File& chainFile, Array<ChainSlot>& slots, String& error)

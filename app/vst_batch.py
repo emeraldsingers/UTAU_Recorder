@@ -67,6 +67,24 @@ def _default_tool_path(name: str) -> str:
     return str(Path.cwd() / "tools" / exe)
 
 
+def _quote_path(path: str) -> str:
+    cleaned = path.strip()
+    if not cleaned:
+        return cleaned
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("'") and cleaned.endswith("'")):
+        return cleaned
+    if " " in cleaned or "\t" in cleaned:
+        return f"\"{cleaned}\""
+    return cleaned
+
+
+def _unquote_path(path: str) -> str:
+    cleaned = path.strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ("\"", "'"):
+        return cleaned[1:-1].strip()
+    return cleaned
+
+
 class VstBatchWorker(QtCore.QThread):
     progress = QtCore.pyqtSignal(int, int, str)
     status = QtCore.pyqtSignal(str)
@@ -457,7 +475,7 @@ class VstMixerPage(QtWidgets.QWidget):
             return
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(path))
+        self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(_quote_path(path)))
         self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
         bypass_item = QtWidgets.QTableWidgetItem()
         bypass_item.setFlags(bypass_item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
@@ -495,20 +513,20 @@ class VstMixerPage(QtWidgets.QWidget):
         )
         if not path:
             return
-        self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(path))
+        self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(_quote_path(path)))
 
     def _browse_cli_host(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, self._t("vst_browse"), "", "Executable (*)")
         if not path:
             return
-        self.cli_edit.setText(path)
+        self.cli_edit.setText(_quote_path(path))
         self._store_host_paths()
 
     def _browse_gui_host(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, self._t("vst_browse"), "", "Executable (*)")
         if not path:
             return
-        self.gui_edit.setText(path)
+        self.gui_edit.setText(_quote_path(path))
         self._store_host_paths()
 
     def _open_plugin_ui(self) -> None:
@@ -518,7 +536,7 @@ class VstMixerPage(QtWidgets.QWidget):
             return
         path_item = self.table.item(row, 0)
         preset_item = self.table.item(row, 1)
-        plugin_path = path_item.text().strip() if path_item else ""
+        plugin_path = _unquote_path(path_item.text()) if path_item else ""
         if not plugin_path:
             QtWidgets.QMessageBox.warning(self, self._t("vst_batch_title"), self._t("vst_no_plugin"))
             return
@@ -527,7 +545,7 @@ class VstMixerPage(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, self._t("vst_batch_title"), self._t("vst_no_gui_host"))
             return
 
-        preset_path = preset_item.text().strip() if preset_item else ""
+        preset_path = _unquote_path(preset_item.text()) if preset_item else ""
 
         cmd = [gui_host, "--plugin", plugin_path]
         if preset_path:
@@ -597,21 +615,21 @@ class VstMixerPage(QtWidgets.QWidget):
             path_item = self.table.item(row, 0)
             preset_item = self.table.item(row, 1)
             bypass_item = self.table.item(row, 2)
-            path = path_item.text().strip() if path_item else ""
+            path = _unquote_path(path_item.text()) if path_item else ""
             if not path:
                 continue
             chain.append({
                 "path": path,
-                "preset": preset_item.text().strip() if preset_item else "",
+                "preset": _unquote_path(preset_item.text()) if preset_item else "",
                 "bypass": bypass_item.checkState() == QtCore.Qt.CheckState.Checked if bypass_item else False,
             })
         return chain
 
     def cli_cmd(self) -> str:
-        return self.cli_edit.text().strip()
+        return _unquote_path(self.cli_edit.text())
 
     def gui_cmd(self) -> str:
-        return self.gui_edit.text().strip()
+        return _unquote_path(self.gui_edit.text())
 
     def worker_count(self) -> int:
         return int(self.workers_spin.value())

@@ -16,6 +16,7 @@ It supports real recording workflows: sessions, reclists, voicebank import, BGM 
 - Romaji auto‑generation (mora segmented)
 - Multi‑language UI (English / Русский / 日本語)
 - Event log for session actions
+- Optional VST batch processing with plugin chains, presets, and backups
 
 ## Requirements
 - Python 3.11+
@@ -29,7 +30,7 @@ Python packages (see `requirements.txt`):
 - pyqtgraph
 
 Optional (VST batch processing host):
-- JUCE (C++), used by the offline VST host in `vst_host/`
+- JUCE (C++), used by the offline VST hosts in `vst_host/`
 
 ## Install
 ```bash
@@ -40,6 +41,20 @@ pip install -r requirements.txt
 ```bash
 python main.py
 ```
+
+## VST Batch Processing (Optional)
+1) Build the VST hosts from `vst_host/` (see `vst_host/README.txt`).
+2) Copy binaries to `tools/`:
+   - `tools/utau_vst_host(.exe)` (CLI)
+   - `tools/utau_vst_host_gui(.exe)` (GUI)
+3) Set paths in **Settings -> VST Tools**.
+4) Open **Tools -> Apply VST Plugins...** and build your chain.
+5) Use **Open plugin UI** to edit a plugin and save its preset.
+6) Set **Parallel jobs** for batch speed (more threads = faster, up to CPU limits).
+
+Backups are created next to each recording folder:
+`_backup_vst_YYYYMMDD_HHMMSS`
+
 
 ## Tests
 ```bash
@@ -89,7 +104,7 @@ main.py     entry point
 - If `sounddevice` can’t find devices, ensure PortAudio is installed and audio drivers are working.
 - Voicebank BGM mapping uses `oto.ini` when present, and falls back to WAV filenames.
 - Overlay tone is a clean sine (no vibrato).
-- The optional VST host is implemented with JUCE and must be built separately (see `vst_host/README.txt`).
+- The optional VST hosts are implemented with JUCE and must be built separately (see `vst_host/README.txt`).
 
 ## License
 MIT

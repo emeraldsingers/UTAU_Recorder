@@ -47,6 +47,16 @@ static bool parseArgs(const StringArray& args, GuiArgs& out)
     return out.pluginPath.isNotEmpty();
 }
 
+static String stripQuotes(const String& value)
+{
+    String cleaned = value.trim();
+    if (cleaned.length() >= 2 && cleaned.startsWithChar('\"') && cleaned.endsWithChar('\"'))
+        cleaned = cleaned.substring(1, cleaned.length() - 1).trim();
+    if (cleaned.length() >= 2 && cleaned.startsWithChar('\'') && cleaned.endsWithChar('\''))
+        cleaned = cleaned.substring(1, cleaned.length() - 1).trim();
+    return cleaned;
+}
+
 static bool applyPreset(AudioPluginInstance& instance, const File& presetFile)
 {
     if (!presetFile.existsAsFile())
@@ -232,7 +242,7 @@ public:
         if (!parseArgs(args, parsed))
             return fail("Invalid arguments.", 2, true);
 
-        File pluginFile(parsed.pluginPath);
+        File pluginFile(stripQuotes(parsed.pluginPath));
         if (!pluginFile.exists())
             return fail("Plugin file not found.", 3);
 
@@ -258,11 +268,11 @@ public:
         if (!instance)
             return fail(error.isNotEmpty() ? error : "Failed to load plugin.", 4);
 
-        File presetFile(parsed.presetPath);
+        File presetFile(stripQuotes(parsed.presetPath));
         if (presetFile.existsAsFile())
             applyPreset(*instance, presetFile);
 
-        File saveFile(parsed.savePath);
+        File saveFile(stripQuotes(parsed.savePath));
         auto content = std::make_unique<HostComponent>(*instance, saveFile);
         window = std::make_unique<HostWindow>(pluginFile.getFileName(), std::move(content));
     }
