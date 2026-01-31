@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +29,7 @@ from models.romaji import kana_to_romaji_tokens, needs_romaji
 from models.session import Session, Item, ItemStatus
 from models.voicebank import import_voicebank, parse_oto_ini
 from storage.session_io import save_session, load_session, export_recordings_json
+from app.vst_batch import VstBatchDialog
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,8 @@ TRANSLATIONS = {
         "import": "Import",
         "settings": "Settings",
         "edit": "Edit",
+        "tools": "Tools",
+        "vst_tools": "VST Tools",
         "new_session": "New Session",
         "open_session": "Open Session",
         "save_session": "Save Session",
@@ -57,6 +61,54 @@ TRANSLATIONS = {
         "theme_light": "Light",
         "theme_dark": "Dark",
         "undo": "Undo",
+        "apply_vst": "Apply VST Plugins...",
+        "vst_batch_title": "VST Batch Processor",
+        "vst_select_audio": "Select audio files from this session",
+        "vst_search_placeholder": "Search by name or file...",
+        "vst_reload": "Reload from session",
+        "vst_select_all": "Select all",
+        "vst_clear_selection": "Clear selection",
+        "vst_use": "Use",
+        "vst_file": "File",
+        "vst_chain_title": "Plugin chain",
+        "vst_chain_presets": "Chain presets",
+        "vst_load_preset": "Load",
+        "vst_save_preset": "Save",
+        "vst_delete_preset": "Delete",
+        "vst_preset_none": "(None)",
+        "vst_preset_name": "Preset name",
+        "vst_plugin_path": "Plugin path",
+        "vst_plugin_preset": "Preset file",
+        "vst_bypass": "Bypass",
+        "vst_add_plugin": "Add plugin",
+        "vst_remove_plugin": "Remove plugin",
+        "vst_move_up": "Move up",
+        "vst_move_down": "Move down",
+        "vst_browse_preset": "Browse preset",
+        "vst_open_ui": "Open plugin UI",
+        "vst_host_cli": "VST host (CLI)",
+        "vst_host_gui": "VST host (GUI)",
+        "vst_tools_settings": "VST Tools Settings",
+        "vst_host_cli_path": "CLI host path",
+        "vst_host_gui_path": "GUI host path",
+        "vst_tools_note": "Paths are stored in settings and used by the batch processor.",
+        "vst_browse": "Browse",
+        "vst_host_note": "Requires external VST hosts: CLI accepts --input/--output/--chain; GUI opens plugin UI to save presets. Set paths in Settings > VST Tools.",
+        "vst_workers": "Parallel jobs",
+        "vst_back": "Back",
+        "vst_next": "Next",
+        "vst_process": "Process",
+        "vst_cancel": "Cancel",
+        "vst_no_files": "Select at least one audio file.",
+        "vst_no_chain": "Add at least one plugin to the chain.",
+        "vst_no_host": "Set a VST host (CLI) first.",
+        "vst_no_gui_host": "Set a VST host (GUI) first.",
+        "vst_no_plugin": "Select a plugin row first.",
+        "vst_preset_prompt": "Save preset as...",
+        "vst_gui_failed": "GUI host exited early. Check the path and build output.",
+        "vst_no_session": "Open or create a session first.",
+        "vst_backup_note": "Backup is created before processing.",
+        "vst_done": "Processing completed.",
         "start_title": "Start",
         "start_new": "New",
         "start_open": "Open",
@@ -442,6 +494,63 @@ class AudioSettingsDialog(QtWidgets.QDialog):
             if combo.itemData(i) == value:
                 combo.setCurrentIndex(i)
                 return
+
+
+def _default_tool_path(name: str) -> str:
+    exe = f"{name}.exe" if sys.platform == "win32" else name
+    return str(Path.cwd() / "tools" / exe)
+
+
+class VstToolsDialog(QtWidgets.QDialog):
+    def __init__(self, lang: str, settings: QtCore.QSettings, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self.lang = lang
+        self.settings = settings
+        self.setWindowTitle(tr(self.lang, "vst_tools_settings"))
+        layout = QtWidgets.QFormLayout(self)
+
+        self.cli_edit = QtWidgets.QLineEdit(
+            self.settings.value("vst_host_cli", _default_tool_path("utau_vst_host"))
+        )
+        self.gui_edit = QtWidgets.QLineEdit(
+            self.settings.value("vst_host_gui", _default_tool_path("utau_vst_host_gui"))
+        )
+
+        cli_row = QtWidgets.QHBoxLayout()
+        cli_row.addWidget(self.cli_edit)
+        self.cli_browse_btn = QtWidgets.QPushButton(tr(self.lang, "vst_browse"))
+        self.cli_browse_btn.clicked.connect(lambda: self._browse(self.cli_edit))
+        cli_row.addWidget(self.cli_browse_btn)
+
+        gui_row = QtWidgets.QHBoxLayout()
+        gui_row.addWidget(self.gui_edit)
+        self.gui_browse_btn = QtWidgets.QPushButton(tr(self.lang, "vst_browse"))
+        self.gui_browse_btn.clicked.connect(lambda: self._browse(self.gui_edit))
+        gui_row.addWidget(self.gui_browse_btn)
+
+        layout.addRow(tr(self.lang, "vst_host_cli_path"), cli_row)
+        layout.addRow(tr(self.lang, "vst_host_gui_path"), gui_row)
+        note = QtWidgets.QLabel(tr(self.lang, "vst_tools_note"))
+        note.setStyleSheet("color: #666666;")
+        note.setWordWrap(True)
+        layout.addRow(note)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def _browse(self, target: QtWidgets.QLineEdit) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, tr(self.lang, "vst_browse"), "", "Executable (*)")
+        if path:
+            target.setText(path)
+
+    def save(self) -> None:
+        self.settings.setValue("vst_host_cli", self.cli_edit.text().strip())
+        self.settings.setValue("vst_host_gui", self.gui_edit.text().strip())
 
 
 class UiSettingsDialog(QtWidgets.QDialog):
@@ -928,8 +1037,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.import_bgm_action = self.import_menu.addAction(tr(self.ui_language, "import_bgm"))
         self.generate_bgm_action = self.import_menu.addAction(tr(self.ui_language, "generate_bgm"))
 
+        self.tools_menu = menu.addMenu(tr(self.ui_language, "tools"))
+        self.vst_batch_action = self.tools_menu.addAction(tr(self.ui_language, "apply_vst"))
+
         self.settings_menu = menu.addMenu(tr(self.ui_language, "settings"))
         self.audio_settings_action = self.settings_menu.addAction(tr(self.ui_language, "audio_devices"))
+        self.vst_tools_action = self.settings_menu.addAction(tr(self.ui_language, "vst_tools"))
         self.ui_settings_action = self.settings_menu.addAction(tr(self.ui_language, "ui_settings"))
 
         self.edit_menu = menu.addMenu(tr(self.ui_language, "edit"))
@@ -948,7 +1061,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.import_voicebank_action.triggered.connect(self._import_voicebank)
         self.import_bgm_action.triggered.connect(self._import_bgm)
         self.generate_bgm_action.triggered.connect(self._generate_bgm)
+        self.vst_batch_action.triggered.connect(self._open_vst_batch)
         self.audio_settings_action.triggered.connect(self._open_audio_settings)
+        self.vst_tools_action.triggered.connect(self._open_vst_tools)
         self.ui_settings_action.triggered.connect(self._open_ui_settings)
         self.undo_action.triggered.connect(self._undo)
 
@@ -1302,6 +1417,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_language()
         self._apply_theme()
 
+    def _open_vst_tools(self) -> None:
+        dialog = VstToolsDialog(self.ui_language, self.settings, self)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        dialog.save()
+
+    def _open_vst_batch(self) -> None:
+        if not self.session:
+            QtWidgets.QMessageBox.warning(self, tr(self.ui_language, "apply_vst"), tr(self.ui_language, "vst_no_session"))
+            return
+        dialog = VstBatchDialog(lambda key: tr(self.ui_language, key), self.settings, self.session, self)
+        dialog.exec()
+
     def _maybe_show_start_dialog(self) -> None:
         recent_entries = []
         for path in self.recent_sessions[:10]:
@@ -1449,6 +1577,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.file_menu.setTitle(tr(self.ui_language, "file"))
         self.import_menu.setTitle(tr(self.ui_language, "import"))
+        self.tools_menu.setTitle(tr(self.ui_language, "tools"))
         self.settings_menu.setTitle(tr(self.ui_language, "settings"))
         self.edit_menu.setTitle(tr(self.ui_language, "edit"))
 
@@ -1463,7 +1592,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.import_voicebank_action.setText(tr(self.ui_language, "import_voicebank"))
         self.import_bgm_action.setText(tr(self.ui_language, "import_bgm"))
         self.generate_bgm_action.setText(tr(self.ui_language, "generate_bgm"))
+        self.vst_batch_action.setText(tr(self.ui_language, "apply_vst"))
         self.audio_settings_action.setText(tr(self.ui_language, "audio_devices"))
+        self.vst_tools_action.setText(tr(self.ui_language, "vst_tools"))
         self.ui_settings_action.setText(tr(self.ui_language, "ui_settings"))
         self.undo_action.setText(tr(self.ui_language, "undo"))
 

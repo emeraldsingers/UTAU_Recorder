@@ -28,6 +28,9 @@ Python packages (see `requirements.txt`):
 - soundfile
 - pyqtgraph
 
+Optional (VST batch processing host):
+- JUCE (C++), used by the offline VST host in `vst_host/`
+
 ## Install
 ```bash
 pip install -r requirements.txt
@@ -86,6 +89,7 @@ main.py     entry point
 - If `sounddevice` can’t find devices, ensure PortAudio is installed and audio drivers are working.
 - Voicebank BGM mapping uses `oto.ini` when present, and falls back to WAV filenames.
 - Overlay tone is a clean sine (no vibrato).
+- The optional VST host is implemented with JUCE and must be built separately (see `vst_host/README.txt`).
 
 ## License
-MVP scaffolding; add a license if distributing.
+MIT

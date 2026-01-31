@@ -12,3 +12,7 @@ Thumbs.db
 *.tmp
 recordings/
 dist/
+vst_host/build/
+tools/
+storage/vst_chains.json
+vst/
