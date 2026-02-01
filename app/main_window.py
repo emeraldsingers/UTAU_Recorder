@@ -3,6 +3,10 @@ from __future__ import annotations
 import logging
 import sys
 import uuid
+from collections import OrderedDict
+import hashlib
+import json
+import multiprocessing as mp
 from pathlib import Path
 from typing import Optional
 
@@ -14,13 +18,18 @@ from datetime import datetime
 from PyQt6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
+pg.setConfigOptions(antialias=True)
+
 from audio.engine import AudioEngine
 from audio.dsp import (
     compute_fft,
     compute_rms,
     estimate_f0,
     note_from_f0,
+    note_to_freq,
     compute_f0_contour,
+    compute_f0_contour_yin,
+    compute_power_db,
     compute_mel_spectrogram,
     f0_to_midi,
     midi_to_note,
@@ -36,6 +45,172 @@ from app.vst_batch import VstBatchDialog
 
 logger = logging.getLogger(__name__)
 
+
+def _analysis_cache_key(path: Path) -> str:
+    return hashlib.sha1(str(path).encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _analysis_cache_paths(cache_dir: Path, key: str) -> tuple[Path, Path]:
+    return cache_dir / f"{key}.json", cache_dir / f"{key}.npz"
+
+def _note_from_f0s(f0s: np.ndarray) -> str:
+    if f0s.size == 0:
+        return "--"
+    mids = [f0_to_midi(float(f)) for f in f0s if f and f > 0]
+    mids = [m for m in mids if m is not None]
+    if not mids:
+        return "--"
+    avg_midi = float(np.mean(mids))
+    return midi_to_note(avg_midi)
+
+
+def _analyze_note_task(
+    path: str,
+    target_sr: int,
+    algo: str,
+    ref_bits: int,
+    cache_dir: Optional[str],
+) -> Optional[tuple[str, float, str]]:
+    try:
+        file_path = Path(path)
+        if not file_path.exists():
+            return None
+        audio, sr = sf.read(str(file_path), dtype="float32")
+        if audio.ndim > 1:
+            audio = np.mean(audio, axis=1)
+        if sr != target_sr:
+            audio = AudioEngine._resample(audio, sr, target_sr)
+            sr = target_sr
+        if algo == "yin":
+            times, f0s = compute_f0_contour_yin(audio, sr)
+        else:
+            times, f0s = compute_f0_contour(audio, sr)
+        note = _note_from_f0s(f0s)
+        if cache_dir:
+            _save_analysis_cache_to_disk(
+                Path(cache_dir),
+                file_path,
+                file_path.stat().st_mtime,
+                algo,
+                sr,
+                ref_bits,
+                times,
+                f0s,
+                np.array([], dtype=np.float32),
+                np.array([], dtype=np.float32),
+                np.array([], dtype=np.float32),
+                np.array([], dtype=np.float32),
+                merge_existing=True,
+                note=note,
+            )
+        return (str(file_path), file_path.stat().st_mtime, note)
+    except Exception:
+        logger.exception("Failed to analyze note for %s", path)
+        return None
+
+
+def _load_analysis_cache_from_disk(
+    cache_dir: Path,
+    abs_path: Path,
+    mtime: float,
+    algo: str,
+    sr: int,
+    ref_bits: int,
+) -> Optional[tuple]:
+    key = _analysis_cache_key(abs_path)
+    meta_path, data_path = _analysis_cache_paths(cache_dir, key)
+    if not meta_path.exists() or not data_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("path") != str(abs_path):
+            return None
+        if float(meta.get("mtime", -1)) != float(mtime):
+            return None
+        if meta.get("algo") != algo:
+            return None
+        if int(meta.get("sr", -1)) != int(sr):
+            return None
+        if int(meta.get("ref_bits", -1)) != int(ref_bits):
+            return None
+        data = np.load(str(data_path))
+        times = data.get("times", np.array([], dtype=np.float32))
+        f0s = data.get("f0s", np.array([], dtype=np.float32))
+        mel_db = data.get("mel_db", np.array([], dtype=np.float32))
+        mel_times = data.get("mel_times", np.array([], dtype=np.float32))
+        power_times = data.get("power_times", np.array([], dtype=np.float32))
+        power_db = data.get("power_db", np.array([], dtype=np.float32))
+        has_pitch = bool(meta.get("has_pitch", False))
+        has_mel = bool(meta.get("has_mel", False))
+        has_power = bool(meta.get("has_power", False))
+        note = meta.get("note")
+        return (times, f0s, mel_db, mel_times, power_times, power_db, has_pitch, has_mel, has_power, note)
+    except Exception:
+        return None
+
+
+def _save_analysis_cache_to_disk(
+    cache_dir: Path,
+    abs_path: Path,
+    mtime: float,
+    algo: str,
+    sr: int,
+    ref_bits: int,
+    times: np.ndarray,
+    f0s: np.ndarray,
+    mel_db: np.ndarray,
+    mel_times: np.ndarray,
+    power_times: np.ndarray,
+    power_db: np.ndarray,
+    merge_existing: bool = True,
+    note: Optional[str] = None,
+) -> None:
+    key = _analysis_cache_key(abs_path)
+    meta_path, data_path = _analysis_cache_paths(cache_dir, key)
+    has_pitch = bool(times.size and f0s.size)
+    has_mel = bool(mel_db.size and mel_times.size)
+    has_power = bool(power_times.size and power_db.size)
+
+    if merge_existing and meta_path.exists() and data_path.exists():
+        existing = _load_analysis_cache_from_disk(cache_dir, abs_path, mtime, algo, sr, ref_bits)
+        if existing:
+            ex_times, ex_f0s, ex_mel, ex_mel_times, ex_power_t, ex_power = existing[:6]
+            ex_has_pitch, ex_has_mel, ex_has_power, ex_note = existing[6:]
+            if not has_pitch and ex_has_pitch:
+                times, f0s = ex_times, ex_f0s
+                has_pitch = True
+            if not has_mel and ex_has_mel:
+                mel_db, mel_times = ex_mel, ex_mel_times
+                has_mel = True
+            if not has_power and ex_has_power:
+                power_times, power_db = ex_power_t, ex_power
+                has_power = True
+            if note is None and ex_note:
+                note = ex_note
+
+    meta = {
+        "path": str(abs_path),
+        "mtime": float(mtime),
+        "algo": str(algo),
+        "sr": int(sr),
+        "ref_bits": int(ref_bits),
+        "has_pitch": bool(has_pitch),
+        "has_mel": bool(has_mel),
+        "has_power": bool(has_power),
+    }
+    if note:
+        meta["note"] = note
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    np.savez_compressed(
+        str(data_path),
+        times=times.astype(np.float32, copy=False),
+        f0s=f0s.astype(np.float32, copy=False),
+        mel_db=mel_db.astype(np.float32, copy=False),
+        mel_times=mel_times.astype(np.float32, copy=False),
+        power_times=power_times.astype(np.float32, copy=False),
+        power_db=power_db.astype(np.float32, copy=False),
+    )
 
 TRANSLATIONS = {
     "English": {
@@ -66,6 +241,10 @@ TRANSLATIONS = {
         "audio_devices": "Audio Devices",
         "language": "Language",
         "ui_settings": "UI Settings",
+        "pitch_algorithm": "Pitch algorithm (charts + note)",
+        "pitch_algo_classic": "Classic (autocorr)",
+        "pitch_algo_yin": "New (YIN)",
+        "note_workers": "Note analysis workers",
         "theme": "Theme",
         "theme_light": "Light",
         "theme_dark": "Dark",
@@ -154,6 +333,7 @@ TRANSLATIONS = {
         "table_note": "Note",
         "table_duration": "Duration",
         "table_file": "File",
+        "recompute_note": "Recompute Note",
         "new_session_title": "New Recording Session",
         "session_name": "Session name",
         "singer": "Singer",
@@ -214,6 +394,10 @@ TRANSLATIONS = {
         "audio_devices": "Аудиоустройства",
         "language": "Язык",
         "ui_settings": "Настройки UI",
+        "pitch_algorithm": "Алгоритм высоты (графики + нота)",
+        "pitch_algo_classic": "Классический (автокорр.)",
+        "pitch_algo_yin": "Новый (YIN)",
+        "note_workers": "Потоки анализа нот",
         "theme": "Тема",
         "theme_light": "Светлая",
         "theme_dark": "Темная",
@@ -254,6 +438,7 @@ TRANSLATIONS = {
         "table_note": "Нота",
         "table_duration": "Длительность",
         "table_file": "Файл",
+        "recompute_note": "Пересчитать ноту",
         "new_session_title": "Новая сессия записи",
         "session_name": "Имя сессии",
         "singer": "Певец",
@@ -314,6 +499,10 @@ TRANSLATIONS = {
         "audio_devices": "オーディオデバイス",
         "language": "言語",
         "ui_settings": "UI設定",
+        "pitch_algorithm": "ピッチアルゴリズム（グラフ＋ノート）",
+        "pitch_algo_classic": "クラシック（自己相関）",
+        "pitch_algo_yin": "新しい（YIN）",
+        "note_workers": "ノート解析ワーカー数",
         "theme": "テーマ",
         "theme_light": "ライト",
         "theme_dark": "ダーク",
@@ -354,6 +543,7 @@ TRANSLATIONS = {
         "table_note": "ノート",
         "table_duration": "長さ",
         "table_file": "ファイル",
+        "recompute_note": "ノートを再計算",
         "new_session_title": "新規録音セッション",
         "session_name": "セッション名",
         "singer": "歌い手",
@@ -535,6 +725,17 @@ class NoteAxis(pg.AxisItem):
         return [midi_to_note(v) for v in values]
 
 
+class NoteTableItem(QtWidgets.QTableWidgetItem):
+    def __init__(self, text: str, priority: int) -> None:
+        super().__init__(text)
+        self._priority = priority
+
+    def __lt__(self, other: QtWidgets.QTableWidgetItem) -> bool:
+        if isinstance(other, NoteTableItem) and self._priority != other._priority:
+            return self._priority < other._priority
+        return super().__lt__(other)
+
+
 class AudioSettingsDialog(QtWidgets.QDialog):
     def __init__(self, lang: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -646,6 +847,8 @@ class UiSettingsDialog(QtWidgets.QDialog):
         lang: str,
         current_lang: str,
         current_theme_key: str,
+        current_pitch_algo: str,
+        current_note_workers: int,
         parent: Optional[QtWidgets.QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -667,8 +870,24 @@ class UiSettingsDialog(QtWidgets.QDialog):
                     self.theme_combo.setCurrentIndex(i)
                     break
 
+        self.pitch_combo = QtWidgets.QComboBox()
+        self.pitch_combo.addItem(tr(self.lang, "pitch_algo_classic"), "classic")
+        self.pitch_combo.addItem(tr(self.lang, "pitch_algo_yin"), "yin")
+        if current_pitch_algo:
+            for i in range(self.pitch_combo.count()):
+                if self.pitch_combo.itemData(i) == current_pitch_algo:
+                    self.pitch_combo.setCurrentIndex(i)
+                    break
+
+        self.note_workers_spin = QtWidgets.QSpinBox()
+        self.note_workers_spin.setRange(1, 16)
+        if current_note_workers:
+            self.note_workers_spin.setValue(int(current_note_workers))
+
         layout.addRow(tr(self.lang, "language"), self.lang_combo)
         layout.addRow(tr(self.lang, "theme"), self.theme_combo)
+        layout.addRow(tr(self.lang, "pitch_algorithm"), self.pitch_combo)
+        layout.addRow(tr(self.lang, "note_workers"), self.note_workers_spin)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -678,8 +897,13 @@ class UiSettingsDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def get_data(self) -> tuple[str, str]:
-        return self.lang_combo.currentText(), str(self.theme_combo.currentData())
+    def get_data(self) -> tuple[str, str, str, int]:
+        return (
+            self.lang_combo.currentText(),
+            str(self.theme_combo.currentData()),
+            str(self.pitch_combo.currentData()),
+            int(self.note_workers_spin.value()),
+        )
 
 
 class VoicebankImportDialog(QtWidgets.QDialog):
@@ -891,43 +1115,202 @@ class BgmNoteDialog(QtWidgets.QDialog):
 
 class NoteAnalysisWorker(QtCore.QThread):
     result = QtCore.pyqtSignal(str, float, str)
+    progress = QtCore.pyqtSignal(int, int)
     finished = QtCore.pyqtSignal()
 
-    def __init__(self, files: list[str], target_sr: int, parent: Optional[QtCore.QObject] = None) -> None:
+    def __init__(
+        self,
+        files: list[str],
+        target_sr: int,
+        algo: str,
+        cache_dir: Optional[Path],
+        ref_bits: int,
+        max_workers: int,
+        parent: Optional[QtCore.QObject] = None,
+    ) -> None:
         super().__init__(parent)
         self.files = files
         self.target_sr = target_sr
+        self.algo = algo
+        self.cache_dir = cache_dir
+        self.ref_bits = ref_bits
+        self.max_workers = max(1, int(max_workers))
 
     def run(self) -> None:
-        for path in self.files:
+        total = len(self.files)
+        self.progress.emit(0, total)
+        done = 0
+        cache_dir = str(self.cache_dir) if self.cache_dir is not None else None
+        try:
+            if self.max_workers <= 1 or total <= 1:
+                for path in self.files:
+                    if self.isInterruptionRequested():
+                        break
+                    result = _analyze_note_task(
+                        path,
+                        self.target_sr,
+                        self.algo,
+                        self.ref_bits,
+                        cache_dir,
+                    )
+                    if result:
+                        self.result.emit(*result)
+                    done += 1
+                    self.progress.emit(done, total)
+            else:
+                from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+                try:
+                    with ProcessPoolExecutor(
+                        max_workers=self.max_workers,
+                        mp_context=mp.get_context("spawn"),
+                    ) as executor:
+                        futures = {
+                            executor.submit(
+                                _analyze_note_task,
+                                p,
+                                self.target_sr,
+                                self.algo,
+                                self.ref_bits,
+                                cache_dir,
+                            ): p
+                            for p in self.files
+                        }
+                        for future in as_completed(futures):
+                            if self.isInterruptionRequested():
+                                break
+                            try:
+                                result = future.result()
+                            except Exception:
+                                logger.exception("Note analysis worker failed")
+                                result = None
+                            if result:
+                                self.result.emit(*result)
+                            done += 1
+                            self.progress.emit(done, total)
+                except Exception:
+                    logger.exception("Process pool failed, falling back to threads")
+                    with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                        futures = {
+                            executor.submit(
+                                _analyze_note_task,
+                                p,
+                                self.target_sr,
+                                self.algo,
+                                self.ref_bits,
+                                cache_dir,
+                            ): p
+                            for p in self.files
+                        }
+                        for future in as_completed(futures):
+                            if self.isInterruptionRequested():
+                                break
+                            try:
+                                result = future.result()
+                            except Exception:
+                                logger.exception("Note analysis worker failed")
+                                result = None
+                            if result:
+                                self.result.emit(*result)
+                            done += 1
+                            self.progress.emit(done, total)
+        finally:
+            self.finished.emit()
+
+
+class RecordedAnalysisWorker(QtCore.QThread):
+    result = QtCore.pyqtSignal(int, object, object, object, object, object, object, object, bool, bool, bool)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        algo: str,
+        ref_bits: int,
+        token: int,
+        cache_key: Optional[tuple],
+        cached_pitch: Optional[tuple],
+        cached_mel: Optional[tuple],
+        cached_power: Optional[tuple],
+        compute_pitch: bool,
+        compute_mel: bool,
+        compute_power: bool,
+        parent: Optional[QtCore.QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.audio = audio
+        self.sr = sr
+        self.algo = algo
+        self.ref_bits = ref_bits
+        self.token = token
+        self.cache_key = cache_key
+        self.cached_pitch = cached_pitch
+        self.cached_mel = cached_mel
+        self.cached_power = cached_power
+        self.compute_pitch = compute_pitch
+        self.compute_mel = compute_mel
+        self.compute_power = compute_power
+
+    def run(self) -> None:
+        try:
+            audio = self.audio
+            if audio.size == 0:
+                return
             if self.isInterruptionRequested():
-                break
-            try:
-                file_path = Path(path)
-                if not file_path.exists():
-                    continue
-                audio, sr = sf.read(str(file_path), dtype="float32")
-                if audio.ndim > 1:
-                    audio = np.mean(audio, axis=1)
-                if sr != self.target_sr:
-                    audio = AudioEngine._resample(audio, sr, self.target_sr)
-                    sr = self.target_sr
-                _, f0s = compute_f0_contour(audio, sr)
-                if f0s.size == 0:
-                    note = "--"
+                return
+            pitch_done = False
+            mel_done = False
+            power_done = False
+            if self.compute_pitch:
+                if self.algo == "yin":
+                    times, f0s = compute_f0_contour_yin(audio, self.sr)
                 else:
-                    mids = [f0_to_midi(float(f)) for f in f0s if f and f > 0]
-                    mids = [m for m in mids if m is not None]
-                    if not mids:
-                        note = "--"
-                    else:
-                        avg_midi = float(np.mean(mids))
-                        note = midi_to_note(avg_midi)
-                mtime = file_path.stat().st_mtime
-                self.result.emit(str(file_path), mtime, note)
-            except Exception:
-                logger.exception("Failed to analyze note for %s", path)
-        self.finished.emit()
+                    times, f0s = compute_f0_contour(audio, self.sr)
+                pitch_done = True
+            elif self.cached_pitch:
+                times, f0s = self.cached_pitch
+                pitch_done = True
+            else:
+                times, f0s = np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+            if self.isInterruptionRequested():
+                return
+            if self.compute_mel:
+                mel_db, mel_times = compute_mel_spectrogram(audio, self.sr)
+                mel_done = True
+            elif self.cached_mel:
+                mel_db, mel_times = self.cached_mel
+                mel_done = True
+            else:
+                mel_db, mel_times = np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+            if self.isInterruptionRequested():
+                return
+            if self.compute_power:
+                power_times, power_db = compute_power_db(audio, self.sr, ref_bits=self.ref_bits)
+                power_done = True
+            elif self.cached_power:
+                power_times, power_db = self.cached_power
+                power_done = True
+            else:
+                power_times, power_db = np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+            if self.isInterruptionRequested():
+                return
+            self.result.emit(
+                self.token,
+                self.cache_key,
+                times,
+                f0s,
+                mel_db,
+                mel_times,
+                power_times,
+                power_db,
+                pitch_done,
+                mel_done,
+                power_done,
+            )
+        except Exception:
+            logger.exception("Failed to update recorded analysis (worker)")
+        finally:
+            self.finished.emit()
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -938,6 +1321,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings = QtCore.QSettings("UtauRecorder", "UtauRecorder")
         self.ui_language = self.settings.value("ui_language", "English")
         self.ui_theme = self.settings.value("ui_theme", "light")
+        self.pitch_algo = self.settings.value("pitch_algo", "classic")
+        self.note_workers = int(self.settings.value("note_workers", 2))
         self.recent_sessions: list[str] = list(self.settings.value("recent_sessions", []))
         self.setWindowTitle(tr(self.ui_language, "app_title"))
         icon_path = Path(__file__).resolve().parent.parent / "icon" / "icon.ico"
@@ -953,6 +1338,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sung_note_cache: dict[str, tuple[float, str]] = {}
         self._note_worker: Optional[NoteAnalysisWorker] = None
         self._note_analysis_pending: set[str] = set()
+        self._analysis_pitch_worker: Optional[RecordedAnalysisWorker] = None
+        self._analysis_spectro_worker: Optional[RecordedAnalysisWorker] = None
+        self._analysis_token = 0
+        self._analysis_cache_limit = 8
+        self._recorded_analysis_cache: OrderedDict[tuple, tuple] = OrderedDict()
+        self._current_analysis_key: Optional[tuple] = None
+        self._current_analysis_meta: Optional[tuple] = None
+        self.note_progress: Optional[QtWidgets.QProgressBar] = None
 
         self.audio = AudioEngine()
         self.audio.error.connect(self._show_error)
@@ -981,7 +1374,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autosave_timer.start()
 
         self.power_history = []
-        self.f0_values = []
         self.history_size = 200
         self.playing = False
         self.play_start_time: Optional[QtCore.QElapsedTimer] = None
@@ -990,6 +1382,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selected_audio: Optional[np.ndarray] = None
         self.undo_stack: list[list[dict]] = []
         self._suppress_item_changed = False
+        self._note_sort_state = 0
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
@@ -1012,6 +1405,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.horizontalHeader().sectionClicked.connect(self._table_header_clicked)
         splitter.addWidget(self.table)
 
         right_panel = QtWidgets.QWidget()
@@ -1112,24 +1506,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.power_plot.setXLink(self.wave_plot)
         self.plot_tabs.addTab(self.power_plot, tr(self.ui_language, "power"))
 
-        self.f0_plot = pg.PlotWidget(
-            title=f"{tr(self.ui_language, 'f0')} (Piano Roll)",
-            axisItems={"left": NoteAxis(orientation="left")},
-        )
-        self.f0_curve = self.f0_plot.plot(pen="g")
-        self.f0_playhead = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("w", width=1))
-        self.f0_playhead.setVisible(False)
-        self.f0_plot.addItem(self.f0_playhead)
-        self.f0_plot.setXLink(self.wave_plot)
-        self.plot_tabs.addTab(self.f0_plot, tr(self.ui_language, "f0"))
-
         self.recorded_f0_plot = pg.PlotWidget(
             title=f"{tr(self.ui_language, 'recorded_f0')} (Piano Roll)",
             axisItems={"left": NoteAxis(orientation="left")},
         )
-        self.recorded_f0_curve = self.recorded_f0_plot.plot(pen="g")
-        self.recorded_f0_playhead = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("w", width=1))
+        self.recorded_f0_plot.showGrid(x=True, y=True, alpha=0.2)
+        self.recorded_f0_curve = self.recorded_f0_plot.plot(
+            pen=pg.mkPen("#22c55e", width=2),
+            connect="finite",
+        )
+        self.recorded_f0_playhead = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#ffcc00", width=1))
         self.recorded_f0_playhead.setVisible(False)
+        self.recorded_f0_playhead.setZValue(10)
         self.recorded_f0_plot.addItem(self.recorded_f0_playhead)
         self.recorded_f0_plot.setXLink(self.wave_plot)
         self.plot_tabs.addTab(self.recorded_f0_plot, tr(self.ui_language, "recorded_f0"))
@@ -1146,8 +1534,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_tabs.addTab(self.mel_plot, tr(self.ui_language, "mel"))
 
         self.status_bar = self.statusBar()
+        self.note_progress = QtWidgets.QProgressBar()
+        self.note_progress.setVisible(False)
+        self.note_progress.setMaximumHeight(12)
+        self.note_progress.setTextVisible(True)
+        self.status_bar.addPermanentWidget(self.note_progress, 1)
 
-        self.wave_plot.scene().sigMouseClicked.connect(self._wave_plot_clicked)
+        for plot in (
+            self.wave_plot,
+            self.spec_plot,
+            self.power_plot,
+            self.recorded_f0_plot,
+            self.mel_plot,
+        ):
+            plot.scene().sigMouseClicked.connect(lambda event, p=plot: self._plot_clicked(p, event))
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -1624,16 +2024,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_error(str(exc))
 
     def _open_ui_settings(self) -> None:
-        dialog = UiSettingsDialog(self.ui_language, str(self.ui_language), str(self.ui_theme), self)
+        dialog = UiSettingsDialog(
+            self.ui_language,
+            str(self.ui_language),
+            str(self.ui_theme),
+            str(self.pitch_algo),
+            int(self.note_workers),
+            self,
+        )
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
-        lang, theme = dialog.get_data()
+        lang, theme, pitch_algo, note_workers = dialog.get_data()
         self.ui_language = lang
         self.ui_theme = theme
+        self.pitch_algo = pitch_algo
+        self.note_workers = int(note_workers)
         self.settings.setValue("ui_language", lang)
         self.settings.setValue("ui_theme", theme)
+        self.settings.setValue("pitch_algo", pitch_algo)
+        self.settings.setValue("note_workers", int(note_workers))
         self._apply_language()
         self._apply_theme()
+        self._sung_note_cache.clear()
+        self._start_note_analysis()
+        self._update_recorded_analysis()
 
     def _open_vst_tools(self) -> None:
         dialog = VstToolsDialog(self.ui_language, self.settings, self)
@@ -1856,7 +2270,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wave_plot.setTitle(tr(self.ui_language, "waveform"))
         self.spec_plot.setTitle(tr(self.ui_language, "spectrum"))
         self.power_plot.setTitle(tr(self.ui_language, "power"))
-        self.f0_plot.setTitle(f"{tr(self.ui_language, 'f0')} (Piano Roll)")
         self.recorded_f0_plot.setTitle(f"{tr(self.ui_language, 'recorded_f0')} (Piano Roll)")
         self.mel_plot.setTitle(tr(self.ui_language, "mel"))
 
@@ -1864,9 +2277,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plot_tabs.setTabText(0, tr(self.ui_language, "waveform"))
             self.plot_tabs.setTabText(1, tr(self.ui_language, "spectrum"))
             self.plot_tabs.setTabText(2, tr(self.ui_language, "power"))
-            self.plot_tabs.setTabText(3, tr(self.ui_language, "f0"))
-            self.plot_tabs.setTabText(4, tr(self.ui_language, "recorded_f0"))
-            self.plot_tabs.setTabText(5, tr(self.ui_language, "mel"))
+            self.plot_tabs.setTabText(3, tr(self.ui_language, "recorded_f0"))
+            self.plot_tabs.setTabText(4, tr(self.ui_language, "mel"))
 
     def _apply_theme(self) -> None:
         if self.ui_theme == "dark":
@@ -1891,7 +2303,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if row < 0 or not self.session:
             self.current_item = None
             return
-        self.current_item = self.session.items[row]
+        index_item = self.table.item(row, 0)
+        if index_item is not None:
+            model_index = index_item.data(QtCore.Qt.ItemDataRole.UserRole)
+        else:
+            model_index = None
+        if model_index is None:
+            model_index = row
+        try:
+            model_index = int(model_index)
+        except (TypeError, ValueError):
+            model_index = row
+        if model_index < 0 or model_index >= len(self.session.items):
+            model_index = row
+        self.current_item = self.session.items[model_index]
         duration = ""
         if self.current_item.duration_sec:
             duration = f" ({self.current_item.duration_sec:.2f}s)"
@@ -2000,7 +2425,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_table()
             self._save_session()
             self._analyze_selected_item()
-            self._update_recorded_analysis()
             self._start_note_analysis()
             if self.playhead:
                 self.playhead.setVisible(True)
@@ -2029,18 +2453,27 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.session:
             self.table.setRowCount(0)
             return
+        note_sort_state = getattr(self, "_note_sort_state", 0)
         self._suppress_item_changed = True
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self.session.items))
         target_note = self._target_bgm_note()
         for row, item in enumerate(self.session.items):
-            self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(item.status.value))
-            self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(item.alias))
+            status_item = QtWidgets.QTableWidgetItem(item.status.value)
+            status_item.setData(QtCore.Qt.ItemDataRole.UserRole, row)
+            self.table.setItem(row, 0, status_item)
+
+            alias_item = QtWidgets.QTableWidgetItem(item.alias)
+            alias_item.setData(QtCore.Qt.ItemDataRole.UserRole, row)
+            self.table.setItem(row, 1, alias_item)
             romaji_text = ""
             if item.romaji is None and needs_romaji(item.alias):
                 item.romaji = "_".join(kana_to_romaji_tokens(item.alias))
             if item.romaji:
                 romaji_text = item.romaji.replace(" ", "_")
-            self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(romaji_text))
+            romaji_item = QtWidgets.QTableWidgetItem(romaji_text)
+            romaji_item.setData(QtCore.Qt.ItemDataRole.UserRole, row)
+            self.table.setItem(row, 2, romaji_item)
             note_text = item.note or ""
             if target_note and item.wav_path:
                 sung_note = self._get_cached_sung_note(item.wav_path)
@@ -2048,10 +2481,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     note_text = "..."
                 else:
                     note_text = self._format_note_check(target_note, sung_note)
-            self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(note_text))
+            note_item = NoteTableItem(note_text, self._note_sort_priority(note_text))
+            note_item.setData(QtCore.Qt.ItemDataRole.UserRole, row)
+            self.table.setItem(row, 3, note_item)
             duration = f"{item.duration_sec:.2f}" if item.duration_sec else ""
-            self.table.setItem(row, 4, QtWidgets.QTableWidgetItem(duration))
-            self.table.setItem(row, 5, QtWidgets.QTableWidgetItem(item.wav_path or ""))
+            duration_item = QtWidgets.QTableWidgetItem(duration)
+            duration_item.setData(QtCore.Qt.ItemDataRole.UserRole, row)
+            self.table.setItem(row, 4, duration_item)
+
+            file_item = QtWidgets.QTableWidgetItem(item.wav_path or "")
+            file_item.setData(QtCore.Qt.ItemDataRole.UserRole, row)
+            self.table.setItem(row, 5, file_item)
             for col in range(6):
                 item_widget = self.table.item(row, col)
                 if item_widget is None:
@@ -2062,6 +2502,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     item_widget.setFlags(flags & ~QtCore.Qt.ItemFlag.ItemIsEditable)
         self._suppress_item_changed = False
+        if note_sort_state != 0:
+            order = (
+                QtCore.Qt.SortOrder.AscendingOrder
+                if note_sort_state > 0
+                else QtCore.Qt.SortOrder.DescendingOrder
+            )
+            self.table.setSortingEnabled(True)
+            self.table.sortItems(3, order)
 
     def _target_bgm_note(self) -> str:
         if not self.session:
@@ -2079,10 +2527,44 @@ class MainWindow(QtWidgets.QMainWindow):
     def _normalize_note(note: str) -> str:
         return note.strip().upper().replace(" ", "")
 
+    @staticmethod
+    def _note_to_midi(note: str) -> Optional[int]:
+        freq = note_to_freq(note)
+        if not freq:
+            return None
+        midi = f0_to_midi(freq)
+        if midi is None:
+            return None
+        return int(round(midi))
+
     def _format_note_check(self, target: str, sung: str) -> str:
-        is_match = self._normalize_note(target) == self._normalize_note(sung)
-        mark = "✅" if is_match else "❌"
+        target_midi = self._note_to_midi(target)
+        sung_midi = self._note_to_midi(sung)
+        if target_midi is None or sung_midi is None:
+            is_match = self._normalize_note(target) == self._normalize_note(sung)
+            mark = "✅" if is_match else "❌"
+            return f"{mark} ({sung})"
+
+        diff = abs(target_midi - sung_midi)
+        if diff == 0:
+            mark = "✅"
+        elif diff <= 2:
+            mark = "⚠️"
+        else:
+            mark = "❌"
         return f"{mark} ({sung})"
+
+    @staticmethod
+    def _note_sort_priority(note_text: str) -> int:
+        if not note_text:
+            return 3
+        if note_text.startswith("❌"):
+            return 0
+        if note_text.startswith("⚠"):
+            return 1
+        if note_text.startswith("✅"):
+            return 2
+        return 3
 
     def _get_cached_sung_note(self, wav_rel: str) -> Optional[str]:
         if not self.session:
@@ -2093,8 +2575,37 @@ class MainWindow(QtWidgets.QMainWindow):
         cache_key = str(abs_path)
         cached = self._sung_note_cache.get(cache_key)
         if not cached:
-            return None
+            disk_note = self._load_note_from_disk_cache(abs_path)
+            if disk_note is None:
+                return None
+            self._sung_note_cache[cache_key] = (abs_path.stat().st_mtime, disk_note)
+            return disk_note
         return cached[1]
+
+    def _recompute_note_for_selection(self) -> None:
+        if not self.session or not self.current_item or not self.current_item.wav_path:
+            return
+        abs_path = Path(self.current_item.wav_path)
+        if not abs_path.is_absolute():
+            abs_path = self.session.session_dir() / abs_path
+        if not abs_path.exists():
+            return
+        cache_key = str(abs_path)
+        if cache_key in self._sung_note_cache:
+            self._sung_note_cache.pop(cache_key, None)
+        cache_dir = self._analysis_cache_dir()
+        if cache_dir:
+            key = _analysis_cache_key(abs_path)
+            meta_path, data_path = _analysis_cache_paths(cache_dir, key)
+            try:
+                meta_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                data_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        self._start_note_analysis_files([str(abs_path)])
 
     def _collect_note_analysis_files(self) -> list[str]:
         if not self.session:
@@ -2116,8 +2627,80 @@ class MainWindow(QtWidgets.QMainWindow):
             cached = self._sung_note_cache.get(cache_key)
             if cached and cached[0] == mtime:
                 continue
+            disk_note = self._load_note_from_disk_cache(abs_path)
+            if disk_note is not None:
+                self._sung_note_cache[cache_key] = (mtime, disk_note)
+                continue
             files.append(str(abs_path))
         return files
+
+    def _start_note_analysis_files(self, files: list[str]) -> None:
+        if not self.session or not files:
+            return
+        if self._note_worker and self._note_worker.isRunning():
+            self._note_analysis_pending.update(files)
+            return
+        cache_dir = self._analysis_cache_dir()
+        ref_bits = self.session.bit_depth if self.session else 16
+        self._note_worker = NoteAnalysisWorker(
+            files,
+            self.session.sample_rate,
+            self.pitch_algo,
+            cache_dir,
+            ref_bits,
+            self.note_workers,
+            self,
+        )
+        self._note_worker.result.connect(self._on_note_analysis_result)
+        self._note_worker.progress.connect(self._on_note_analysis_progress)
+        self._note_worker.finished.connect(self._on_note_analysis_finished)
+        self._update_note_progress(0, len(files))
+        self._note_worker.start()
+
+    def _load_note_from_disk_cache(self, abs_path: Path) -> Optional[str]:
+        if not self.session:
+            return None
+        cache_dir = self._analysis_cache_dir()
+        if cache_dir is None:
+            return None
+        try:
+            mtime = abs_path.stat().st_mtime
+        except OSError:
+            return None
+        ref_bits = self.session.bit_depth if self.session else 16
+        cached = _load_analysis_cache_from_disk(
+            cache_dir,
+            abs_path,
+            mtime,
+            self.pitch_algo,
+            self.session.sample_rate,
+            ref_bits,
+        )
+        if not cached:
+            return None
+        times, f0s, _mel, _mel_times, _pt, _pd, has_pitch, _has_mel, _has_power, note = cached
+        if note:
+            return str(note)
+        if has_pitch and f0s.size:
+            computed = _note_from_f0s(f0s)
+            _save_analysis_cache_to_disk(
+                cache_dir,
+                abs_path,
+                mtime,
+                self.pitch_algo,
+                self.session.sample_rate,
+                ref_bits,
+                times,
+                f0s,
+                np.array([], dtype=np.float32),
+                np.array([], dtype=np.float32),
+                np.array([], dtype=np.float32),
+                np.array([], dtype=np.float32),
+                merge_existing=True,
+                note=computed,
+            )
+            return computed
+        return None
 
     def _start_note_analysis(self) -> None:
         target_note = self._target_bgm_note()
@@ -2125,14 +2708,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         files = self._collect_note_analysis_files()
         if not files:
+            self._update_note_progress(0, 0, hide=True)
             return
-        if self._note_worker and self._note_worker.isRunning():
-            self._note_analysis_pending.update(files)
-            return
-        self._note_worker = NoteAnalysisWorker(files, self.session.sample_rate, self)
-        self._note_worker.result.connect(self._on_note_analysis_result)
-        self._note_worker.finished.connect(self._on_note_analysis_finished)
-        self._note_worker.start()
+        self._start_note_analysis_files(files)
 
     def _stop_note_worker(self) -> None:
         if self._note_worker and self._note_worker.isRunning():
@@ -2140,6 +2718,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self._note_worker.wait(2000)
         self._note_worker = None
         self._note_analysis_pending.clear()
+        self._update_note_progress(0, 0, hide=True)
+
+    def _stop_recorded_worker(self) -> None:
+        for attr in ("_analysis_pitch_worker", "_analysis_spectro_worker"):
+            worker = getattr(self, attr)
+            if worker and worker.isRunning():
+                worker.requestInterruption()
+                worker.wait(2000)
+            setattr(self, attr, None)
+
+    def _analysis_cache_dir(self) -> Optional[Path]:
+        if not self.session:
+            return None
+        path = self.session.session_dir() / "_analysis_cache"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _on_note_analysis_result(self, path: str, mtime: float, note: str) -> None:
         self._sung_note_cache[path] = (mtime, note)
@@ -2155,7 +2749,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if not abs_path.is_absolute():
                 abs_path = self.session.session_dir() / abs_path
             if str(abs_path) == path:
-                self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(self._format_note_check(target_note, note)))
+                note_text = self._format_note_check(target_note, note)
+                note_item = NoteTableItem(note_text, self._note_sort_priority(note_text))
+                self.table.setItem(row, 3, note_item)
                 break
 
     def _on_note_analysis_finished(self) -> None:
@@ -2163,10 +2759,39 @@ class MainWindow(QtWidgets.QMainWindow):
             files = list(self._note_analysis_pending)
             self._note_analysis_pending.clear()
             if self.session:
-                self._note_worker = NoteAnalysisWorker(files, self.session.sample_rate, self)
+                cache_dir = self._analysis_cache_dir()
+                ref_bits = self.session.bit_depth if self.session else 16
+                self._note_worker = NoteAnalysisWorker(
+                    files,
+                    self.session.sample_rate,
+                    self.pitch_algo,
+                    cache_dir,
+                    ref_bits,
+                    self.note_workers,
+                    self,
+                )
                 self._note_worker.result.connect(self._on_note_analysis_result)
+                self._note_worker.progress.connect(self._on_note_analysis_progress)
                 self._note_worker.finished.connect(self._on_note_analysis_finished)
+                self._update_note_progress(0, len(files))
                 self._note_worker.start()
+        else:
+            self._update_note_progress(0, 0, hide=True)
+
+    def _on_note_analysis_progress(self, done: int, total: int) -> None:
+        self._update_note_progress(done, total)
+
+    def _update_note_progress(self, done: int, total: int, hide: bool = False) -> None:
+        if not self.note_progress:
+            return
+        if hide or total <= 0:
+            self.note_progress.setVisible(False)
+            self.note_progress.setRange(0, 1)
+            self.note_progress.setValue(0)
+            return
+        self.note_progress.setVisible(True)
+        self.note_progress.setRange(0, total)
+        self.note_progress.setValue(done)
 
     def _update_visuals(self) -> None:
         if not self.audio.is_active():
@@ -2214,26 +2839,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.power_history.append(rms)
         if len(self.power_history) > self.history_size:
             self.power_history.pop(0)
-        self.power_curve.setData(self.power_history)
+        power_x = np.arange(len(self.power_history)) * (self.visual_timer.interval() / 1000.0)
+        self.power_curve.setData(power_x, self.power_history)
 
         f0 = estimate_f0(buffer, self.audio.sample_rate)
         note, cents = note_from_f0(f0)
         self.note_label.setText(f"{tr(self.ui_language, 'current_note_prefix')}{note} ({cents:+.1f} cents)")
 
-        midi_val = f0_to_midi(f0)
-        if midi_val is not None:
-            self.f0_values.append(midi_val)
-            if len(self.f0_values) > self.history_size:
-                self.f0_values.pop(0)
-            xs = np.arange(len(self.f0_values)) * (self.visual_timer.interval() / 1000.0)
-            self.f0_curve.setData(xs, self.f0_values)
+        # Live current note uses estimate_f0 (classic). Charts are handled elsewhere.
 
-    def _wave_plot_clicked(self, event: QtCore.QEvent) -> None:
+    def _plot_clicked(self, plot: pg.PlotWidget, event: QtCore.QEvent) -> None:
         if not self.playhead:
             return
         if self.audio.recording or self.audio.preview:
             return
-        view_pos = self.wave_plot.plotItem.vb.mapSceneToView(event.scenePos())
+        if hasattr(event, "button") and event.button() != QtCore.Qt.MouseButton.LeftButton:
+            return
+        view_pos = plot.plotItem.vb.mapSceneToView(event.scenePos())
         x = float(view_pos.x())
         if x < 0:
             x = 0.0
@@ -2273,9 +2895,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "power_playhead"):
             self.power_playhead.setVisible(True)
             self.power_playhead.setPos(pos)
-        if hasattr(self, "f0_playhead"):
-            self.f0_playhead.setVisible(True)
-            self.f0_playhead.setPos(pos)
         if hasattr(self, "recorded_f0_playhead"):
             self.recorded_f0_playhead.setVisible(True)
             self.recorded_f0_playhead.setPos(pos)
@@ -2288,8 +2907,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.spec_playhead.setVisible(False)
             if hasattr(self, "power_playhead"):
                 self.power_playhead.setVisible(False)
-            if hasattr(self, "f0_playhead"):
-                self.f0_playhead.setVisible(False)
             if hasattr(self, "recorded_f0_playhead"):
                 self.recorded_f0_playhead.setVisible(False)
             if hasattr(self, "mel_playhead"):
@@ -2303,31 +2920,279 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spec_playhead.setVisible(False)
         if hasattr(self, "power_playhead"):
             self.power_playhead.setVisible(False)
-        if hasattr(self, "f0_playhead"):
-            self.f0_playhead.setVisible(False)
         if hasattr(self, "recorded_f0_playhead"):
             self.recorded_f0_playhead.setVisible(False)
         if hasattr(self, "mel_playhead"):
             self.mel_playhead.setVisible(False)
+        if hasattr(self, "mel_playhead"):
+            self.mel_playhead.setVisible(False)
 
     def _update_recorded_analysis(self) -> None:
-        try:
-            audio = self.selected_audio if self.selected_audio is not None else self.audio.get_waveform_audio()
-            if audio.size == 0:
-                return
-            times, f0s = compute_f0_contour(audio, self.audio.sample_rate)
-            if times.size and f0s.size:
-                midi_vals = np.array([f0_to_midi(f) if f > 0 else np.nan for f in f0s], dtype=np.float32)
-                self.recorded_f0_curve.setData(times, midi_vals)
-            mel_db, mel_times = compute_mel_spectrogram(audio, self.audio.sample_rate)
-            if mel_db.size:
-                self.mel_img.setImage(mel_db.T, autoLevels=True)
-                self.mel_img.setRect(QtCore.QRectF(0, 0, float(mel_times[-1]) if mel_times.size else 1.0, mel_db.shape[0]))
-                if mel_times.size:
-                    self.mel_plot.setLimits(xMin=0, xMax=float(mel_times[-1]))
-        except Exception as exc:
-            logger.exception("Failed to update recorded analysis")
-            self._show_error(str(exc))
+        audio = self.selected_audio if self.selected_audio is not None else self.audio.get_waveform_audio()
+        if audio.size == 0:
+            return
+        self._start_recorded_analysis(audio)
+
+    def _start_recorded_analysis(
+        self,
+        audio: np.ndarray,
+        cache_key: Optional[tuple] = None,
+    ) -> None:
+        self._current_analysis_key = cache_key
+        self._analysis_token += 1
+        token = self._analysis_token
+        self._stop_recorded_worker()
+        ref_bits = self.session.bit_depth if self.session else 16
+        cache_dir = self._analysis_cache_dir()
+        empty = np.array([], dtype=np.float32)
+        times = empty
+        f0s = empty
+        mel_db = empty
+        mel_times = empty
+        power_times = empty
+        power_db = empty
+        has_pitch = False
+        has_mel = False
+        has_power = False
+        if cache_key and cache_key in self._recorded_analysis_cache:
+            cached_entry = self._recorded_analysis_cache[cache_key]
+            self._recorded_analysis_cache.move_to_end(cache_key)
+            (
+                times,
+                f0s,
+                mel_db,
+                mel_times,
+                power_times,
+                power_db,
+                has_pitch,
+                has_mel,
+                has_power,
+            ) = cached_entry
+        if cache_dir and cache_key:
+            cached = _load_analysis_cache_from_disk(
+                cache_dir,
+                Path(cache_key[0]),
+                cache_key[1],
+                cache_key[2],
+                cache_key[3],
+                cache_key[4],
+            )
+            if cached:
+                (
+                    cached_times,
+                    cached_f0s,
+                    cached_mel_db,
+                    cached_mel_times,
+                    cached_power_times,
+                    cached_power_db,
+                    cached_has_pitch,
+                    cached_has_mel,
+                    cached_has_power,
+                    _note_value,
+                ) = cached
+                if not has_pitch and cached_has_pitch:
+                    times, f0s, has_pitch = cached_times, cached_f0s, True
+                if not has_mel and cached_has_mel:
+                    mel_db, mel_times, has_mel = cached_mel_db, cached_mel_times, True
+                if not has_power and cached_has_power:
+                    power_times, power_db, has_power = cached_power_times, cached_power_db, True
+
+        if cache_key:
+            entry = (times, f0s, mel_db, mel_times, power_times, power_db, has_pitch, has_mel, has_power)
+            self._recorded_analysis_cache[cache_key] = entry
+            self._recorded_analysis_cache.move_to_end(cache_key)
+            while len(self._recorded_analysis_cache) > self._analysis_cache_limit:
+                self._recorded_analysis_cache.popitem(last=False)
+
+        if has_pitch or has_mel or has_power:
+            self._apply_recorded_analysis(
+                times if has_pitch else empty,
+                f0s if has_pitch else empty,
+                mel_db if has_mel else empty,
+                mel_times if has_mel else empty,
+                power_times if has_power else empty,
+                power_db if has_power else empty,
+            )
+
+        if has_pitch and has_mel and has_power:
+            return
+
+        compute_pitch = not has_pitch
+        compute_mel = not has_mel
+        compute_power = not has_power
+
+        self._current_analysis_meta = (
+            Path(cache_key[0]) if cache_key else None,
+            cache_key[1] if cache_key else None,
+            cache_key[2] if cache_key else None,
+            cache_key[3] if cache_key else None,
+            cache_key[4] if cache_key else None,
+        )
+        audio_copy = audio.astype(np.float32, copy=True)
+        if compute_pitch:
+            self._analysis_pitch_worker = RecordedAnalysisWorker(
+                audio_copy,
+                self.audio.sample_rate,
+                self.pitch_algo,
+                ref_bits,
+                token,
+                cache_key,
+                None,
+                None,
+                None,
+                True,
+                False,
+                False,
+                self,
+            )
+            self._analysis_pitch_worker.result.connect(self._on_recorded_analysis_result)
+            self._analysis_pitch_worker.start()
+        if compute_mel or compute_power:
+            self._analysis_spectro_worker = RecordedAnalysisWorker(
+                audio_copy,
+                self.audio.sample_rate,
+                self.pitch_algo,
+                ref_bits,
+                token,
+                cache_key,
+                None,
+                None,
+                None,
+                False,
+                compute_mel,
+                compute_power,
+                self,
+            )
+            self._analysis_spectro_worker.result.connect(self._on_recorded_analysis_result)
+            self._analysis_spectro_worker.start()
+
+    def _on_recorded_analysis_result(
+        self,
+        token: int,
+        cache_key: Optional[tuple],
+        times: np.ndarray,
+        f0s: np.ndarray,
+        mel_db: np.ndarray,
+        mel_times: np.ndarray,
+        power_times: np.ndarray,
+        power_db: np.ndarray,
+        pitch_done: bool,
+        mel_done: bool,
+        power_done: bool,
+    ) -> None:
+        if token != self._analysis_token:
+            return
+        if cache_key is not None and cache_key != self._current_analysis_key:
+            return
+
+        empty = np.array([], dtype=np.float32)
+        existing = self._recorded_analysis_cache.get(cache_key) if cache_key else None
+        if existing:
+            (
+                ex_times,
+                ex_f0s,
+                ex_mel_db,
+                ex_mel_times,
+                ex_power_times,
+                ex_power_db,
+                ex_has_pitch,
+                ex_has_mel,
+                ex_has_power,
+            ) = existing
+        else:
+            ex_times = empty
+            ex_f0s = empty
+            ex_mel_db = empty
+            ex_mel_times = empty
+            ex_power_times = empty
+            ex_power_db = empty
+            ex_has_pitch = False
+            ex_has_mel = False
+            ex_has_power = False
+
+        if pitch_done:
+            ex_times = times
+            ex_f0s = f0s
+            ex_has_pitch = bool(times.size and f0s.size)
+        if mel_done:
+            ex_mel_db = mel_db
+            ex_mel_times = mel_times
+            ex_has_mel = bool(mel_db.size and mel_times.size)
+        if power_done:
+            ex_power_times = power_times
+            ex_power_db = power_db
+            ex_has_power = bool(power_times.size and power_db.size)
+
+        if cache_key is not None:
+            entry = (
+                ex_times,
+                ex_f0s,
+                ex_mel_db,
+                ex_mel_times,
+                ex_power_times,
+                ex_power_db,
+                ex_has_pitch,
+                ex_has_mel,
+                ex_has_power,
+            )
+            self._recorded_analysis_cache[cache_key] = entry
+            self._recorded_analysis_cache.move_to_end(cache_key)
+            while len(self._recorded_analysis_cache) > self._analysis_cache_limit:
+                self._recorded_analysis_cache.popitem(last=False)
+            if (pitch_done or mel_done or power_done) and self._current_analysis_meta and self._current_analysis_meta[0] is not None:
+                cache_dir = self._analysis_cache_dir()
+                if cache_dir:
+                    _save_analysis_cache_to_disk(
+                        cache_dir,
+                        self._current_analysis_meta[0],
+                        float(self._current_analysis_meta[1]),
+                        str(self._current_analysis_meta[2]),
+                        int(self._current_analysis_meta[3]),
+                        int(self._current_analysis_meta[4]),
+                        times,
+                        f0s,
+                        mel_db,
+                        mel_times,
+                        power_times,
+                        power_db,
+                        merge_existing=True,
+                    )
+
+        self._apply_recorded_analysis(
+            ex_times if ex_has_pitch else empty,
+            ex_f0s if ex_has_pitch else empty,
+            ex_mel_db if ex_has_mel else empty,
+            ex_mel_times if ex_has_mel else empty,
+            ex_power_times if ex_has_power else empty,
+            ex_power_db if ex_has_power else empty,
+        )
+
+    def _apply_recorded_analysis(
+        self,
+        times: np.ndarray,
+        f0s: np.ndarray,
+        mel_db: np.ndarray,
+        mel_times: np.ndarray,
+        power_times: np.ndarray,
+        power_db: np.ndarray,
+    ) -> None:
+        if times.size and f0s.size:
+            midi_vals = np.array([f0_to_midi(f) if f > 0 else np.nan for f in f0s], dtype=np.float32)
+            self.recorded_f0_curve.setData(times, midi_vals)
+        else:
+            self.recorded_f0_curve.setData([], [])
+        if mel_db.size:
+            self.mel_img.setImage(mel_db.T, autoLevels=True)
+            self.mel_img.setRect(QtCore.QRectF(0, 0, float(mel_times[-1]) if mel_times.size else 1.0, mel_db.shape[0]))
+            if mel_times.size:
+                self.mel_plot.setLimits(xMin=0, xMax=float(mel_times[-1]))
+        else:
+            self.mel_img.clear()
+        if power_times.size:
+            self.power_curve.setData(power_times, power_db)
+            self.power_plot.setLimits(xMin=0, xMax=float(power_times[-1]))
+        else:
+            self.power_curve.setData([], [])
 
     def _analyze_selected_item(self) -> None:
         if not self.session or not self.current_item or not self.current_item.wav_path:
@@ -2352,24 +3217,61 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spec_curve.setData(freqs, mag)
             rms = compute_rms(snippet)
             self.power_history = [rms]
-            self.power_curve.setData(self.power_history)
+            self.power_curve.setData([0.0], self.power_history)
             f0 = estimate_f0(snippet, self.audio.sample_rate)
             note, cents = note_from_f0(f0)
             self.note_label.setText(f"{tr(self.ui_language, 'current_note_prefix')}{note} ({cents:+.1f} cents)")
-            self._update_recorded_analysis()
+            mtime = abs_path.stat().st_mtime
+            ref_bits = self.session.bit_depth if self.session else 16
+            cache_key = (
+                str(abs_path),
+                mtime,
+                str(self.pitch_algo),
+                int(self.audio.sample_rate),
+                int(ref_bits),
+            )
+            self._start_recorded_analysis(audio, cache_key)
         except Exception as exc:
             logger.exception("Failed to analyze selected item")
             self._show_error(str(exc))
+
+    def _table_header_clicked(self, index: int) -> None:
+        if index != 3:
+            if self._note_sort_state != 0:
+                self._note_sort_state = 0
+                self.table.setSortingEnabled(False)
+                self._refresh_table()
+            return
+        if self._note_sort_state == 0:
+            self._note_sort_state = 1
+        elif self._note_sort_state == 1:
+            self._note_sort_state = -1
+        else:
+            self._note_sort_state = 0
+        if self._note_sort_state == 0:
+            self.table.setSortingEnabled(False)
+            self._refresh_table()
+            return
+        order = (
+            QtCore.Qt.SortOrder.AscendingOrder
+            if self._note_sort_state > 0
+            else QtCore.Qt.SortOrder.DescendingOrder
+        )
+        self.table.setSortingEnabled(True)
+        self.table.sortItems(3, order)
 
     def _table_context_menu(self, pos: QtCore.QPoint) -> None:
         menu = QtWidgets.QMenu(self)
         add_action = menu.addAction(tr(self.ui_language, "add_entry"))
         delete_action = menu.addAction(tr(self.ui_language, "delete_entry"))
+        recompute_action = menu.addAction(tr(self.ui_language, "recompute_note"))
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if action == add_action:
             self._add_entry()
         elif action == delete_action:
             self._delete_entry()
+        elif action == recompute_action:
+            self._recompute_note_for_selection()
 
     def _add_entry(self) -> None:
         if not self.session:
@@ -2442,12 +3344,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_session()
 
     def _clear_analysis(self) -> None:
+        self._stop_recorded_worker()
+        self._current_analysis_key = None
         self.wave_curve.setData([], [])
         self.spec_curve.setData([], [])
         self.power_history = []
         self.power_curve.setData([], [])
-        self.f0_values = []
-        self.f0_curve.setData([], [])
         self.recorded_f0_curve.setData([], [])
         self.mel_img.clear()
         self.note_label.setText(tr(self.ui_language, "current_note"))
@@ -2459,8 +3361,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spec_playhead.setVisible(False)
         if hasattr(self, "power_playhead"):
             self.power_playhead.setVisible(False)
-        if hasattr(self, "f0_playhead"):
-            self.f0_playhead.setVisible(False)
         if hasattr(self, "recorded_f0_playhead"):
             self.recorded_f0_playhead.setVisible(False)
 
@@ -2653,5 +3553,6 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self._stop_note_worker()
+        self._stop_recorded_worker()
         self._autosave()
         super().closeEvent(event)

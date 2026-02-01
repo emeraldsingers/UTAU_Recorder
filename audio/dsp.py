@@ -57,6 +57,57 @@ def estimate_f0(frame: np.ndarray, sr: int, fmin: float = 50.0, fmax: float = 10
     return float(sr / lag)
 
 
+def estimate_f0_yin(
+    frame: np.ndarray,
+    sr: int,
+    fmin: float = 50.0,
+    fmax: float = 1000.0,
+    threshold: float = 0.1,
+) -> Optional[float]:
+    if frame.size == 0:
+        return None
+    frame = frame.astype(np.float32)
+    frame = frame - np.mean(frame)
+    rms = compute_rms(frame)
+    if rms < NOISE_GATE_RMS:
+        return None
+    if np.max(np.abs(frame)) < 1e-4:
+        return None
+
+    min_tau = int(sr / fmax)
+    max_tau = int(sr / fmin)
+    max_tau = min(max_tau, len(frame) - 1)
+    if max_tau <= min_tau:
+        return None
+
+    diff = np.zeros(max_tau + 1, dtype=np.float32)
+    for tau in range(1, max_tau + 1):
+        diff[tau] = np.sum((frame[:-tau] - frame[tau:]) ** 2)
+
+    cmnd = np.zeros_like(diff)
+    cmnd[0] = 1.0
+    running_sum = 0.0
+    for tau in range(1, max_tau + 1):
+        running_sum += diff[tau]
+        if running_sum > 0.0:
+            cmnd[tau] = diff[tau] * tau / running_sum
+        else:
+            cmnd[tau] = 1.0
+
+    tau = None
+    for t in range(min_tau, max_tau):
+        if cmnd[t] < threshold:
+            while t + 1 <= max_tau and cmnd[t + 1] < cmnd[t]:
+                t += 1
+            tau = t
+            break
+    if tau is None:
+        tau = int(np.argmin(cmnd[min_tau:max_tau + 1])) + min_tau
+    if tau <= 0:
+        return None
+    return float(sr / tau)
+
+
 def note_from_f0(f0: Optional[float]) -> Tuple[str, float]:
     if not f0 or f0 <= 0:
         return "--", 0.0
@@ -116,6 +167,24 @@ def compute_f0_contour(audio: np.ndarray, sr: int, frame_size: int = 1024, hop: 
     return times, np.array(f0s, dtype=np.float32)
 
 
+def compute_f0_contour_yin(
+    audio: np.ndarray,
+    sr: int,
+    frame_size: int = 2048,
+    hop: int = 256,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if audio.size == 0:
+        return np.array([]), np.array([])
+    frames = []
+    for start in range(0, len(audio) - frame_size + 1, hop):
+        frames.append(audio[start:start + frame_size])
+    if not frames:
+        return np.array([]), np.array([])
+    f0s = [estimate_f0_yin(frame, sr) or 0.0 for frame in frames]
+    times = np.arange(len(f0s)) * (hop / sr)
+    return times, np.array(f0s, dtype=np.float32)
+
+
 def compute_mel_spectrogram(
     audio: np.ndarray, sr: int, n_fft: int = 1024, hop: int = 256, n_mels: int = 64
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -136,6 +205,32 @@ def compute_mel_spectrogram(
     mel_db = mel_db[::-1, :]
     times = np.arange(mel_db.shape[1]) * (hop / sr)
     return mel_db, times
+
+
+def compute_power_db(
+    audio: np.ndarray,
+    sr: int,
+    window_size: int = 1024,
+    hop: int = 256,
+    ref_bits: int = 16,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if audio.size == 0:
+        return np.array([]), np.array([])
+    padding = max(0, (window_size - hop) // 2)
+    if padding > 0:
+        audio = np.concatenate((np.zeros(padding, dtype=audio.dtype), audio))
+    ref = float(2 ** (ref_bits - 1))
+    powers: list[float] = []
+    for start in range(0, len(audio), hop):
+        segment = audio[start:start + window_size]
+        if segment.size == 0:
+            break
+        rms = float(np.sqrt(np.mean(np.square(segment.astype(np.float64)))))
+        rms_scaled = rms * ref
+        db = 20.0 * np.log10(max(rms_scaled, 1.0) / ref)
+        powers.append(db)
+    times = np.arange(len(powers)) * (hop / sr)
+    return times, np.array(powers, dtype=np.float32)
 
 
 def _mel_filterbank(sr: int, n_fft: int, n_mels: int) -> np.ndarray:
