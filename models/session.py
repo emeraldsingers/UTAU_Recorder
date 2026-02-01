@@ -69,6 +69,7 @@ class Session:
     bgm_overlay_note: Optional[str] = None
     bgm_overlay_duration: Optional[float] = None
     bgm_override: bool = False
+    target_note: Optional[str] = None
 
     def session_dir(self) -> Path:
         return self.base_path
@@ -103,6 +104,7 @@ class Session:
             "bgm_overlay_note": self.bgm_overlay_note,
             "bgm_overlay_duration": self.bgm_overlay_duration,
             "bgm_override": self.bgm_override,
+            "target_note": self.target_note,
             "items": [item.to_dict() for item in self.items],
         }
 
@@ -128,6 +130,7 @@ class Session:
             bgm_overlay_note=data.get("bgm_overlay_note"),
             bgm_overlay_duration=data.get("bgm_overlay_duration"),
             bgm_override=data.get("bgm_override", False),
+            target_note=data.get("target_note"),
         )
         session.items = [Item.from_dict(item) for item in data.get("items", [])]
         return session

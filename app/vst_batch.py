@@ -8,7 +8,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -115,6 +116,9 @@ class VstBatchWorker(QtCore.QThread):
 
         backup_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_dirs: dict[Path, Path] = {}
+        log_paths: dict[Path, Path] = {}
+        log_lock = threading.Lock()
+        stop_event = threading.Event()
 
         chain_file = None
         try:
@@ -136,18 +140,36 @@ class VstBatchWorker(QtCore.QThread):
                     backup_dir = file_path.parent / f"_backup_vst_{backup_stamp}"
                     backup_dir.mkdir(parents=True, exist_ok=True)
                     backup_dirs[file_path.parent] = backup_dir
+                    log_paths[file_path.parent] = backup_dir / "vst_batch.log"
 
-            def process_one(file_path: Path) -> tuple[bool, str]:
+            def log_write(log_path: Path, text: str) -> None:
+                if not log_path:
+                    return
+                with log_lock:
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                    with log_path.open("a", encoding="utf-8") as f:
+                        f.write(text)
+
+            def process_one(file_path: Path) -> tuple[str, str]:
+                if stop_event.is_set():
+                    return "cancel", ""
                 if not file_path.exists():
-                    return False, f"File not found: {file_path}"
+                    return "error", f"File not found: {file_path}"
                 backup_path = backup_dirs[file_path.parent] / file_path.name
                 shutil.copy2(file_path, backup_path)
-                tmp_out = file_path.with_name(f"{file_path.stem}.vsttmp{file_path.suffix}")
+                tmp_out = None
                 try:
-                    if tmp_out.exists():
-                        tmp_out.unlink()
+                    tmp_handle = tempfile.NamedTemporaryFile(
+                        delete=False,
+                        dir=str(file_path.parent),
+                        prefix=f"{file_path.stem}.vsttmp.",
+                        suffix=file_path.suffix,
+                    )
+                    tmp_out = Path(tmp_handle.name)
+                    tmp_handle.close()
                     cmd = base_cmd + ["--input", str(file_path), "--output", str(tmp_out), "--chain", str(chain_file)]
-                    self.status.emit(f"Processing {file_path.name}...")
+                    if stop_event.is_set():
+                        return "cancel", ""
                     result = subprocess.run(
                         cmd,
                         capture_output=True,
@@ -156,38 +178,70 @@ class VstBatchWorker(QtCore.QThread):
                         errors="replace",
                         check=False,
                     )
+                    log_path = log_paths.get(file_path.parent)
+                    timestamp = datetime.now().isoformat(timespec="seconds")
+                    log_write(
+                        log_path,
+                        (
+                            f"[{timestamp}] {file_path.name}\n"
+                            f"CMD: {' '.join(cmd)}\n"
+                            f"RET: {result.returncode}\n"
+                            f"STDOUT:\n{result.stdout}\n"
+                            f"STDERR:\n{result.stderr}\n\n"
+                        ),
+                    )
                     if result.returncode != 0:
                         stderr = result.stderr.strip()
                         msg = stderr or result.stdout.strip() or "Unknown VST host error."
-                        return False, msg
+                        return "error", msg
                     if not tmp_out.exists():
-                        return False, "VST host did not produce output file."
+                        return "error", "VST host did not produce output file."
                     os.replace(tmp_out, file_path)
-                    return True, ""
+                    return "ok", ""
                 finally:
-                    if tmp_out.exists():
+                    if tmp_out and tmp_out.exists():
                         tmp_out.unlink(missing_ok=True)
 
             if self.max_workers <= 1:
                 for idx, file_path in enumerate(self.files, start=1):
+                    if stop_event.is_set():
+                        return
                     self.progress.emit(idx - 1, total, str(file_path))
-                    ok, msg = process_one(file_path)
-                    if not ok:
+                    self.status.emit(f"Processing {file_path.name}...")
+                    status, msg = process_one(file_path)
+                    if status == "error":
+                        stop_event.set()
                         self.error.emit(msg)
                         return
                     self.progress.emit(idx, total, str(file_path))
             else:
                 done = 0
+                queue = list(self.files)
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    futures = {executor.submit(process_one, fp): fp for fp in self.files}
-                    for future in as_completed(futures):
-                        file_path = futures[future]
-                        ok, msg = future.result()
-                        done += 1
-                        self.progress.emit(done, total, str(file_path))
-                        if not ok:
-                            self.error.emit(msg)
+                    futures: dict[object, Path] = {}
+
+                    def submit_next() -> None:
+                        if stop_event.is_set() or not queue:
                             return
+                        fp = queue.pop(0)
+                        self.status.emit(f"Processing {fp.name}...")
+                        futures[executor.submit(process_one, fp)] = fp
+
+                    for _ in range(min(self.max_workers, len(queue))):
+                        submit_next()
+
+                    while futures:
+                        done_set, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                        for future in done_set:
+                            file_path = futures.pop(future)
+                            status, msg = future.result()
+                            done += 1
+                            self.progress.emit(done, total, str(file_path))
+                            if status == "error":
+                                stop_event.set()
+                                self.error.emit(msg)
+                                return
+                            submit_next()
 
             self.status.emit("Done.")
             self.finished_ok.emit()
@@ -567,6 +621,7 @@ class VstMixerPage(QtWidgets.QWidget):
 
     def _check_gui_process(self, proc: subprocess.Popen) -> None:
         if proc.poll() is None:
+            QtCore.QTimer.singleShot(500, lambda: self._check_gui_process(proc))
             return
         try:
             stdout, stderr = proc.communicate(timeout=0)
@@ -578,6 +633,8 @@ class VstMixerPage(QtWidgets.QWidget):
             if details:
                 message = f"{message}\n\n{details}"
             QtWidgets.QMessageBox.critical(self, self._t("vst_batch_title"), message)
+        if proc in self._gui_processes:
+            self._gui_processes.remove(proc)
 
     def _store_host_paths(self) -> None:
         self.settings.setValue("vst_host_cli", self.cli_cmd())

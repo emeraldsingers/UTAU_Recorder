@@ -27,7 +27,9 @@ class RingBuffer:
             self.buffer[self.index:] = data[:first]
             self.buffer[:end % self.size] = data[first:]
         self.index = end % self.size
-        if n > 0 and self.index == 0:
+        if self.full:
+            return
+        if end >= self.size:
             self.full = True
 
     def get(self, length: int) -> np.ndarray:

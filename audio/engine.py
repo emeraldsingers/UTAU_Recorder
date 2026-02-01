@@ -49,6 +49,11 @@ class AudioEngine(QtCore.QObject):
         self._recorded_cache: Optional[np.ndarray] = None
         self._recorded_cache_samples = 0
         self._last_recorded: Optional[np.ndarray] = None
+        self._record_vis_stride = 4
+        self._out_buffer: Optional[np.ndarray] = None
+        self._bgm_buffer: Optional[np.ndarray] = None
+        self._overlay_buffer: Optional[np.ndarray] = None
+        self._monitor_buffer: Optional[np.ndarray] = None
         self.device: Optional[tuple[Optional[int], Optional[int]]] = None
         self._last_bgm_chunk: Optional[np.ndarray] = None
         self.trim_tail_ms = 50
@@ -186,6 +191,7 @@ class AudioEngine(QtCore.QObject):
         self._recorded_samples = 0
         self._recorded_cache = None
         self._recorded_cache_samples = 0
+        self._last_recorded = None
 
         subtype = "PCM_16"
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -221,6 +227,9 @@ class AudioEngine(QtCore.QObject):
                     sr,
                     subtype="PCM_16",
                 )
+                if data.ndim > 1:
+                    data = np.mean(data, axis=1)
+                self._last_recorded = data.astype(np.float32, copy=False)
                 try:
                     self._record_temp_path.unlink(missing_ok=True)
                 except Exception:
@@ -230,7 +239,6 @@ class AudioEngine(QtCore.QObject):
                     self._record_temp_path.replace(self._record_final_path)
                 except Exception:
                     self.status.emit("Failed to finalize recording file")
-        self._last_recorded = self._get_recorded_concat()
         self.status.emit("Recording stopped")
         if not self.preview:
             self._stop_stream_if_idle()
@@ -265,6 +273,11 @@ class AudioEngine(QtCore.QObject):
         if self._last_recorded is not None:
             return self._last_recorded
         return self._ring.get(self.sample_rate)
+
+    def get_waveform_sample_rate(self) -> float:
+        if self.recording:
+            return float(self.sample_rate) / float(self._record_vis_stride)
+        return float(self.sample_rate)
 
     def get_bgm_data(self) -> Optional[np.ndarray]:
         if self._bgm_data is None:
@@ -320,76 +333,106 @@ class AudioEngine(QtCore.QObject):
             with self._record_lock:
                 if self._record_file:
                     self._record_file.write(indata)
-            self._recorded_chunks.append(mono_in.copy())
-            self._recorded_samples += len(mono_in)
+            if self._record_vis_stride > 1:
+                vis = mono_in[:: self._record_vis_stride].copy()
+            else:
+                vis = mono_in.copy()
+            self._recorded_chunks.append(vis)
+            self._recorded_samples += len(vis)
             self._recorded_cache = None
 
-        out = np.zeros((frames, self.channels), dtype=np.float32)
+        self._ensure_buffers(frames)
+        out = self._out_buffer
         if self.preview or (self.recording and self.bgm_during_recording):
-            bgm = self._bgm_chunk(frames)
-            self._last_bgm_chunk = bgm.copy()
-            out += bgm[:, None]
+            self._fill_bgm_chunk(self._bgm_buffer)
+            mix = self._bgm_buffer
+            if self.bgm_gain != 1.0:
+                np.multiply(mix, self.bgm_gain, out=mix)
+            if self._overlay_enabled:
+                self._fill_overlay_chunk(self._overlay_buffer)
+                if self.overlay_gain != 1.0:
+                    np.multiply(self._overlay_buffer, self.overlay_gain, out=self._overlay_buffer)
+                np.add(mix, self._overlay_buffer, out=mix)
+            if self._last_bgm_chunk is None or len(self._last_bgm_chunk) != frames:
+                self._last_bgm_chunk = np.zeros(frames, dtype=np.float32)
+            np.copyto(self._last_bgm_chunk, mix)
+            for ch in range(self.channels):
+                out[:, ch] += mix
         if self.monitor_gain > 0.0:
-            out += mono_in[:, None] * self.monitor_gain
+            gain = self.monitor_gain
+            if self._monitor_buffer is None or len(self._monitor_buffer) != frames:
+                self._monitor_buffer = np.zeros(frames, dtype=np.float32)
+            np.multiply(mono_in, gain, out=self._monitor_buffer)
+            for ch in range(self.channels):
+                out[:, ch] += self._monitor_buffer
         outdata[:] = out
 
-    def _bgm_chunk(self, frames: int) -> np.ndarray:
-        if self._bgm_data is None:
-            base = np.zeros(frames, dtype=np.float32)
+    def _ensure_buffers(self, frames: int) -> None:
+        if self._out_buffer is None or self._out_buffer.shape != (frames, self.channels):
+            self._out_buffer = np.zeros((frames, self.channels), dtype=np.float32)
         else:
-            if self._bgm_pos < 0:
-                advance = min(frames, -self._bgm_pos)
-                self._bgm_pos += advance
-                if advance < frames:
-                    remaining = frames - advance
-                    chunk = self._read_bgm(remaining)
-                    base = np.concatenate((np.zeros(advance, dtype=np.float32), chunk))
-                else:
-                    base = np.zeros(frames, dtype=np.float32)
-            else:
-                base = self._read_bgm(frames)
+            self._out_buffer.fill(0.0)
+        if self._bgm_buffer is None or len(self._bgm_buffer) != frames:
+            self._bgm_buffer = np.zeros(frames, dtype=np.float32)
+        if self._overlay_buffer is None or len(self._overlay_buffer) != frames:
+            self._overlay_buffer = np.zeros(frames, dtype=np.float32)
+        if self._monitor_buffer is None or len(self._monitor_buffer) != frames:
+            self._monitor_buffer = np.zeros(frames, dtype=np.float32)
 
-        overlay = self._bgm_overlay_chunk(frames) if self._overlay_enabled else np.zeros(frames, dtype=np.float32)
-        return base * self.bgm_gain + overlay * self.overlay_gain
-
-    def _read_bgm(self, frames: int) -> np.ndarray:
+    def _fill_bgm_chunk(self, buffer: np.ndarray) -> None:
+        buffer.fill(0.0)
         if self._bgm_data is None:
-            return np.zeros(frames, dtype=np.float32)
-        start = self._bgm_pos
-        end = start + frames
-        if start >= len(self._bgm_data):
-            if self._bgm_playlist:
-                self._bgm_index = (self._bgm_index + 1) % len(self._bgm_playlist)
-                self._bgm_data = self._bgm_playlist[self._bgm_index]
-                self._bgm_pos = 0
-                return self._read_bgm(frames)
-            return np.zeros(frames, dtype=np.float32)
-        chunk = self._bgm_data[start:end]
-        self._bgm_pos = end
-        if len(chunk) < frames:
-            pad = frames - len(chunk)
-            if self._bgm_playlist:
-                self._bgm_index = (self._bgm_index + 1) % len(self._bgm_playlist)
-                self._bgm_data = self._bgm_playlist[self._bgm_index]
-                self._bgm_pos = 0
-                next_chunk = self._read_bgm(pad)
-                chunk = np.concatenate((chunk, next_chunk))
-            else:
-                chunk = np.pad(chunk, (0, pad))
-        return chunk.astype(np.float32)
+            return
+        frames = len(buffer)
+        if self._bgm_pos < 0:
+            advance = min(frames, -self._bgm_pos)
+            self._bgm_pos += advance
+            if advance < frames:
+                self._read_bgm_into(buffer, advance, frames - advance)
+            return
+        self._read_bgm_into(buffer, 0, frames)
 
-    def _bgm_overlay_chunk(self, frames: int) -> np.ndarray:
+    def _read_bgm_into(self, buffer: np.ndarray, offset: int, frames: int) -> None:
+        if self._bgm_data is None:
+            return
+        remaining = frames
+        write_pos = offset
+        while remaining > 0:
+            start = self._bgm_pos
+            if start >= len(self._bgm_data):
+                if self._bgm_playlist:
+                    self._bgm_index = (self._bgm_index + 1) % len(self._bgm_playlist)
+                    self._bgm_data = self._bgm_playlist[self._bgm_index]
+                    self._bgm_pos = 0
+                    start = 0
+                else:
+                    buffer[write_pos:write_pos + remaining] = 0.0
+                    self._bgm_pos = start + remaining
+                    return
+            available = len(self._bgm_data) - start
+            take = min(available, remaining)
+            buffer[write_pos:write_pos + take] = self._bgm_data[start:start + take]
+            self._bgm_pos = start + take
+            write_pos += take
+            remaining -= take
+            if remaining > 0 and not self._bgm_playlist:
+                buffer[write_pos:write_pos + remaining] = 0.0
+                self._bgm_pos += remaining
+                return
+
+    def _fill_overlay_chunk(self, buffer: np.ndarray) -> None:
+        buffer.fill(0.0)
         if self._bgm_overlay is None:
-            return np.zeros(frames, dtype=np.float32)
+            return
+        frames = len(buffer)
         start = self._bgm_overlay_pos
         end = start + frames
         if start >= len(self._bgm_overlay):
-            return np.zeros(frames, dtype=np.float32)
-        chunk = self._bgm_overlay[start:end]
+            return
+        available = len(self._bgm_overlay) - start
+        take = min(available, frames)
+        buffer[:take] = self._bgm_overlay[start:start + take]
         self._bgm_overlay_pos = end
-        if len(chunk) < frames:
-            chunk = np.pad(chunk, (0, frames - len(chunk)))
-        return chunk.astype(np.float32)
 
     @staticmethod
     def _resample(data: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:

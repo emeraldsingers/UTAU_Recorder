@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -24,6 +25,7 @@ from audio.dsp import (
     f0_to_midi,
     midi_to_note,
 )
+from audio.ring_buffer import RingBuffer
 from models.parsers import parse_reclist_text, read_text_guess
 from models.romaji import kana_to_romaji_tokens, needs_romaji
 from models.session import Session, Item, ItemStatus
@@ -44,6 +46,13 @@ TRANSLATIONS = {
         "edit": "Edit",
         "tools": "Tools",
         "vst_tools": "VST Tools",
+        "session_settings": "Session Settings",
+        "session_settings_title": "Edit Session Settings",
+        "session_settings_note": "Changes apply to future recordings.",
+        "session_settings_busy": "Stop recording/preview before editing session settings.",
+        "rename_files_title": "Rename recordings",
+        "rename_files_prompt": "Rename existing files to match new prefix/suffix?",
+        "rename_files_failed": "Failed to rename one or more files.",
         "new_session": "New Session",
         "open_session": "Open Session",
         "save_session": "Save Session",
@@ -155,6 +164,7 @@ TRANSLATIONS = {
         "channels": "Channels",
         "output_prefix": "Output prefix",
         "output_suffix": "Output suffix",
+        "session_note": "Target note",
         "missing_data": "Missing data",
         "name_required": "Name is required.",
         "audio_devices_title": "Audio Devices",
@@ -183,6 +193,13 @@ TRANSLATIONS = {
         "file": "Файл",
         "import": "Импорт",
         "settings": "Настройки",
+        "session_settings": "Настройки сессии",
+        "session_settings_title": "Изменить настройки сессии",
+        "session_settings_note": "Изменения применяются к будущим записям.",
+        "session_settings_busy": "Остановите запись/прослушивание перед изменением настроек сессии.",
+        "rename_files_title": "Переименовать записи",
+        "rename_files_prompt": "Переименовать существующие файлы под новый префикс/суффикс?",
+        "rename_files_failed": "Не удалось переименовать один или несколько файлов.",
         "edit": "Правка",
         "new_session": "Новая сессия",
         "open_session": "Открыть сессию",
@@ -247,6 +264,7 @@ TRANSLATIONS = {
         "channels": "Каналы",
         "output_prefix": "Префикс файла",
         "output_suffix": "Суффикс файла",
+        "session_note": "Целевая нота",
         "missing_data": "Недостаточно данных",
         "name_required": "Имя обязательно.",
         "audio_devices_title": "Аудиоустройства",
@@ -275,6 +293,13 @@ TRANSLATIONS = {
         "file": "ファイル",
         "import": "インポート",
         "settings": "設定",
+        "session_settings": "セッション設定",
+        "session_settings_title": "セッション設定を編集",
+        "session_settings_note": "変更は今後の録音に適用されます。",
+        "session_settings_busy": "録音/プレビューを停止してからセッション設定を変更してください。",
+        "rename_files_title": "録音ファイルの名前変更",
+        "rename_files_prompt": "既存のファイルを新しいプレフィックス/サフィックスに合わせて名前変更しますか？",
+        "rename_files_failed": "一部のファイルの名前変更に失敗しました。",
         "edit": "編集",
         "new_session": "新規セッション",
         "open_session": "セッションを開く",
@@ -339,6 +364,7 @@ TRANSLATIONS = {
         "channels": "チャンネル",
         "output_prefix": "出力プレフィックス",
         "output_suffix": "出力サフィックス",
+        "session_note": "ターゲットノート",
         "missing_data": "データ不足",
         "name_required": "名前が必要です。",
         "audio_devices_title": "オーディオデバイス",
@@ -397,6 +423,8 @@ class NewSessionDialog(QtWidgets.QDialog):
         self.channels_combo.addItems(["1", "2"])
         self.output_prefix_edit = QtWidgets.QLineEdit()
         self.output_suffix_edit = QtWidgets.QLineEdit()
+        self.note_edit = QtWidgets.QLineEdit()
+        self.note_edit.setPlaceholderText("A4")
 
         layout.addRow(tr(self.lang, "session_name"), self.name_edit)
         layout.addRow(tr(self.lang, "singer"), self.singer_edit)
@@ -406,6 +434,7 @@ class NewSessionDialog(QtWidgets.QDialog):
         layout.addRow(tr(self.lang, "channels"), self.channels_combo)
         layout.addRow(tr(self.lang, "output_prefix"), self.output_prefix_edit)
         layout.addRow(tr(self.lang, "output_suffix"), self.output_suffix_edit)
+        layout.addRow(tr(self.lang, "session_note"), self.note_edit)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -440,6 +469,64 @@ class NewSessionDialog(QtWidgets.QDialog):
             "channels": int(self.channels_combo.currentText()),
             "output_prefix": self.output_prefix_edit.text().strip(),
             "output_suffix": self.output_suffix_edit.text().strip(),
+            "target_note": self.note_edit.text().strip() or None,
+        }
+
+
+class SessionSettingsDialog(QtWidgets.QDialog):
+    def __init__(self, lang: str, session: Session, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self.lang = lang
+        self.setWindowTitle(tr(self.lang, "session_settings_title"))
+        layout = QtWidgets.QFormLayout(self)
+
+        self.sr_spin = QtWidgets.QSpinBox()
+        self.sr_spin.setRange(8000, 192000)
+        self.sr_spin.setValue(session.sample_rate)
+
+        self.bit_depth_combo = QtWidgets.QComboBox()
+        self.bit_depth_combo.addItems(["16", "24", "32"])
+        self.bit_depth_combo.setCurrentText(str(session.bit_depth))
+
+        self.channels_combo = QtWidgets.QComboBox()
+        self.channels_combo.addItems(["1", "2"])
+        self.channels_combo.setCurrentText(str(session.channels))
+
+        self.output_prefix_edit = QtWidgets.QLineEdit(session.output_prefix)
+        self.output_suffix_edit = QtWidgets.QLineEdit(session.output_suffix)
+
+        self.note_edit = QtWidgets.QLineEdit(session.target_note or "")
+        self.note_edit.setPlaceholderText("A4")
+
+        layout.addRow(tr(self.lang, "sample_rate"), self.sr_spin)
+        layout.addRow(tr(self.lang, "bit_depth"), self.bit_depth_combo)
+        layout.addRow(tr(self.lang, "channels"), self.channels_combo)
+        layout.addRow(tr(self.lang, "output_prefix"), self.output_prefix_edit)
+        layout.addRow(tr(self.lang, "output_suffix"), self.output_suffix_edit)
+        layout.addRow(tr(self.lang, "session_note"), self.note_edit)
+
+        note_label = QtWidgets.QLabel(tr(self.lang, "session_settings_note"))
+        note_label.setWordWrap(True)
+        layout.addRow(note_label)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_data(self) -> Optional[dict]:
+        if self.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return None
+        return {
+            "sample_rate": self.sr_spin.value(),
+            "bit_depth": int(self.bit_depth_combo.currentText()),
+            "channels": int(self.channels_combo.currentText()),
+            "output_prefix": self.output_prefix_edit.text().strip(),
+            "output_suffix": self.output_suffix_edit.text().strip(),
+            "target_note": self.note_edit.text().strip() or None,
         }
 
 
@@ -801,6 +888,48 @@ class BgmNoteDialog(QtWidgets.QDialog):
             self.timing_combo.currentText(),
         )
 
+
+class NoteAnalysisWorker(QtCore.QThread):
+    result = QtCore.pyqtSignal(str, float, str)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(self, files: list[str], target_sr: int, parent: Optional[QtCore.QObject] = None) -> None:
+        super().__init__(parent)
+        self.files = files
+        self.target_sr = target_sr
+
+    def run(self) -> None:
+        for path in self.files:
+            if self.isInterruptionRequested():
+                break
+            try:
+                file_path = Path(path)
+                if not file_path.exists():
+                    continue
+                audio, sr = sf.read(str(file_path), dtype="float32")
+                if audio.ndim > 1:
+                    audio = np.mean(audio, axis=1)
+                if sr != self.target_sr:
+                    audio = AudioEngine._resample(audio, sr, self.target_sr)
+                    sr = self.target_sr
+                _, f0s = compute_f0_contour(audio, sr)
+                if f0s.size == 0:
+                    note = "--"
+                else:
+                    mids = [f0_to_midi(float(f)) for f in f0s if f and f > 0]
+                    mids = [m for m in mids if m is not None]
+                    if not mids:
+                        note = "--"
+                    else:
+                        avg_midi = float(np.mean(mids))
+                        note = midi_to_note(avg_midi)
+                mtime = file_path.stat().st_mtime
+                self.result.emit(str(file_path), mtime, note)
+            except Exception:
+                logger.exception("Failed to analyze note for %s", path)
+        self.finished.emit()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -821,6 +950,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session_path: Optional[Path] = None
         self.record_start_time: Optional[float] = None
         self.voicebank_samples: dict[str, Path] = {}
+        self._sung_note_cache: dict[str, tuple[float, str]] = {}
+        self._note_worker: Optional[NoteAnalysisWorker] = None
+        self._note_analysis_pending: set[str] = set()
 
         self.audio = AudioEngine()
         self.audio.error.connect(self._show_error)
@@ -1041,6 +1173,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vst_batch_action = self.tools_menu.addAction(tr(self.ui_language, "apply_vst"))
 
         self.settings_menu = menu.addMenu(tr(self.ui_language, "settings"))
+        self.session_settings_action = self.settings_menu.addAction(tr(self.ui_language, "session_settings"))
         self.audio_settings_action = self.settings_menu.addAction(tr(self.ui_language, "audio_devices"))
         self.vst_tools_action = self.settings_menu.addAction(tr(self.ui_language, "vst_tools"))
         self.ui_settings_action = self.settings_menu.addAction(tr(self.ui_language, "ui_settings"))
@@ -1062,6 +1195,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.import_bgm_action.triggered.connect(self._import_bgm)
         self.generate_bgm_action.triggered.connect(self._generate_bgm)
         self.vst_batch_action.triggered.connect(self._open_vst_batch)
+        self.session_settings_action.triggered.connect(self._open_session_settings)
         self.audio_settings_action.triggered.connect(self._open_audio_settings)
         self.vst_tools_action.triggered.connect(self._open_vst_tools)
         self.ui_settings_action.triggered.connect(self._open_ui_settings)
@@ -1087,6 +1221,8 @@ class MainWindow(QtWidgets.QMainWindow):
         data = dialog.get_data()
         if not data:
             return
+        self._stop_note_worker()
+        self._sung_note_cache.clear()
         self.session = Session(
             name=data["name"],
             singer=data["singer"],
@@ -1096,6 +1232,7 @@ class MainWindow(QtWidgets.QMainWindow):
             channels=data["channels"],
             output_prefix=data.get("output_prefix", ""),
             output_suffix=data.get("output_suffix", ""),
+            target_note=data.get("target_note"),
         )
         self.audio.sample_rate = self.session.sample_rate
         self.audio.channels = self.session.channels
@@ -1119,12 +1256,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         try:
+            self._stop_note_worker()
+            self._sung_note_cache.clear()
             self.session = load_session(Path(path))
             self._add_recent_session(path)
             self.audio.sample_rate = self.session.sample_rate
             self.audio.channels = self.session.channels
             self._restore_session_assets()
             self._refresh_table()
+            self._start_note_analysis()
             self._set_status("Session loaded")
             bgm_info = self.session.bgm_wav_path or (self.session.bgm_note or "--")
             QtWidgets.QMessageBox.information(
@@ -1290,6 +1430,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.session.bgm_overlay_enabled = True
                     self._save_session()
                     self._log_event("bgm_overlay", note.strip())
+                    self._refresh_table()
+                    self._start_note_analysis()
                 return
 
             if timing_mode == tr(self.ui_language, "bgm_timing") and not (self.session and self.session.voicebank_use_bgm):
@@ -1314,6 +1456,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._save_session()
                 self._log_event("bgm_generate", note.strip())
                 self._save_generated_bgm(note.strip(), dur)
+                self._refresh_table()
+                self._start_note_analysis()
         except Exception as exc:
             self._show_error(str(exc))
 
@@ -1342,7 +1486,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     lines.append(f"{item.alias}\\t{item.note}")
                 else:
                     lines.append(item.alias)
-            Path(path).write_text("\\n".join(lines), encoding="utf-8")
+            Path(path).write_text("\n".join(lines), encoding="utf-8")
             self._set_status("Reclist saved")
         except Exception as exc:
             self._show_error(str(exc))
@@ -1387,6 +1531,80 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             except Exception:
                 logger.exception("Failed to set saved BGM overlay")
+
+    def _open_session_settings(self) -> None:
+        if not self.session:
+            self._show_error(tr(self.ui_language, "vst_no_session"))
+            return
+        if self.audio.recording or self.audio.preview:
+            QtWidgets.QMessageBox.warning(
+                self,
+                tr(self.ui_language, "session_settings_title"),
+                tr(self.ui_language, "session_settings_busy"),
+            )
+            return
+        dialog = SessionSettingsDialog(self.ui_language, self.session, self)
+        data = dialog.get_data()
+        if not data:
+            return
+        old_prefix = self.session.output_prefix
+        old_suffix = self.session.output_suffix
+        prefix_changed = data["output_prefix"] != old_prefix
+        suffix_changed = data["output_suffix"] != old_suffix
+
+        rename_files = False
+        if (prefix_changed or suffix_changed) and any(item.wav_path for item in self.session.items):
+            result = QtWidgets.QMessageBox.question(
+                self,
+                tr(self.ui_language, "rename_files_title"),
+                tr(self.ui_language, "rename_files_prompt"),
+                QtWidgets.QMessageBox.StandardButton.Yes
+                | QtWidgets.QMessageBox.StandardButton.No
+                | QtWidgets.QMessageBox.StandardButton.Cancel,
+            )
+            if result == QtWidgets.QMessageBox.StandardButton.Cancel:
+                return
+            rename_files = result == QtWidgets.QMessageBox.StandardButton.Yes
+
+        sample_rate_changed = data["sample_rate"] != self.session.sample_rate
+        channels_changed = data["channels"] != self.session.channels
+
+        self.session.sample_rate = data["sample_rate"]
+        self.session.bit_depth = data["bit_depth"]
+        self.session.channels = data["channels"]
+        self.session.output_prefix = data["output_prefix"]
+        self.session.output_suffix = data["output_suffix"]
+        self.session.target_note = data.get("target_note")
+
+        if sample_rate_changed or channels_changed:
+            self.audio.sample_rate = self.session.sample_rate
+            self.audio.channels = self.session.channels
+            if self.audio.stream:
+                self.audio.stream.stop()
+                self.audio.stream.close()
+                self.audio.stream = None
+            self.audio._ring = RingBuffer(size=self.session.sample_rate * 5)
+            self.audio.set_pre_roll_ms(self.pre_roll_spin.value())
+
+        if rename_files:
+            ok, mapping = self._rename_recordings_for_prefix_suffix(
+                self.session.output_prefix,
+                self.session.output_suffix,
+            )
+            if not ok:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    tr(self.ui_language, "rename_files_title"),
+                    tr(self.ui_language, "rename_files_failed"),
+                )
+            for old_abs, new_abs in mapping.items():
+                cached = self._sung_note_cache.pop(old_abs, None)
+                if cached:
+                    self._sung_note_cache[new_abs] = cached
+
+        self._save_session()
+        self._refresh_table()
+        self._start_note_analysis()
 
     def _open_audio_settings(self) -> None:
         dialog = AudioSettingsDialog(self.ui_language, self)
@@ -1466,12 +1684,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_recent_path(self, path: str) -> None:
         try:
+            self._stop_note_worker()
+            self._sung_note_cache.clear()
             self.session = load_session(Path(path))
             self._add_recent_session(path)
             self.audio.sample_rate = self.session.sample_rate
             self.audio.channels = self.session.channels
             self._restore_session_assets()
             self._refresh_table()
+            self._start_note_analysis()
             self._set_status("Session loaded")
         except Exception as exc:
             logger.exception("Failed to open recent session")
@@ -1593,6 +1814,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.import_bgm_action.setText(tr(self.ui_language, "import_bgm"))
         self.generate_bgm_action.setText(tr(self.ui_language, "generate_bgm"))
         self.vst_batch_action.setText(tr(self.ui_language, "apply_vst"))
+        self.session_settings_action.setText(tr(self.ui_language, "session_settings"))
         self.audio_settings_action.setText(tr(self.ui_language, "audio_devices"))
         self.vst_tools_action.setText(tr(self.ui_language, "vst_tools"))
         self.ui_settings_action.setText(tr(self.ui_language, "ui_settings"))
@@ -1779,6 +2001,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._save_session()
             self._analyze_selected_item()
             self._update_recorded_analysis()
+            self._start_note_analysis()
             if self.playhead:
                 self.playhead.setVisible(True)
                 self.playhead.setPos(0.0)
@@ -1808,6 +2031,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._suppress_item_changed = True
         self.table.setRowCount(len(self.session.items))
+        target_note = self._target_bgm_note()
         for row, item in enumerate(self.session.items):
             self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(item.status.value))
             self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(item.alias))
@@ -1817,7 +2041,14 @@ class MainWindow(QtWidgets.QMainWindow):
             if item.romaji:
                 romaji_text = item.romaji.replace(" ", "_")
             self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(romaji_text))
-            self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(item.note or ""))
+            note_text = item.note or ""
+            if target_note and item.wav_path:
+                sung_note = self._get_cached_sung_note(item.wav_path)
+                if sung_note is None:
+                    note_text = "..."
+                else:
+                    note_text = self._format_note_check(target_note, sung_note)
+            self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(note_text))
             duration = f"{item.duration_sec:.2f}" if item.duration_sec else ""
             self.table.setItem(row, 4, QtWidgets.QTableWidgetItem(duration))
             self.table.setItem(row, 5, QtWidgets.QTableWidgetItem(item.wav_path or ""))
@@ -1832,6 +2063,111 @@ class MainWindow(QtWidgets.QMainWindow):
                     item_widget.setFlags(flags & ~QtCore.Qt.ItemFlag.ItemIsEditable)
         self._suppress_item_changed = False
 
+    def _target_bgm_note(self) -> str:
+        if not self.session:
+            return ""
+        if self.session.target_note:
+            return self.session.target_note.strip()
+        note = (self.session.bgm_note or "").strip()
+        if note:
+            return note
+        if self.session.bgm_overlay_enabled and self.session.bgm_overlay_note:
+            return self.session.bgm_overlay_note.strip()
+        return ""
+
+    @staticmethod
+    def _normalize_note(note: str) -> str:
+        return note.strip().upper().replace(" ", "")
+
+    def _format_note_check(self, target: str, sung: str) -> str:
+        is_match = self._normalize_note(target) == self._normalize_note(sung)
+        mark = "✅" if is_match else "❌"
+        return f"{mark} ({sung})"
+
+    def _get_cached_sung_note(self, wav_rel: str) -> Optional[str]:
+        if not self.session:
+            return None
+        abs_path = Path(wav_rel)
+        if not abs_path.is_absolute():
+            abs_path = self.session.session_dir() / abs_path
+        cache_key = str(abs_path)
+        cached = self._sung_note_cache.get(cache_key)
+        if not cached:
+            return None
+        return cached[1]
+
+    def _collect_note_analysis_files(self) -> list[str]:
+        if not self.session:
+            return []
+        files: list[str] = []
+        for item in self.session.items:
+            if not item.wav_path:
+                continue
+            abs_path = Path(item.wav_path)
+            if not abs_path.is_absolute():
+                abs_path = self.session.session_dir() / abs_path
+            if not abs_path.exists():
+                continue
+            try:
+                mtime = abs_path.stat().st_mtime
+            except OSError:
+                continue
+            cache_key = str(abs_path)
+            cached = self._sung_note_cache.get(cache_key)
+            if cached and cached[0] == mtime:
+                continue
+            files.append(str(abs_path))
+        return files
+
+    def _start_note_analysis(self) -> None:
+        target_note = self._target_bgm_note()
+        if not target_note or not self.session:
+            return
+        files = self._collect_note_analysis_files()
+        if not files:
+            return
+        if self._note_worker and self._note_worker.isRunning():
+            self._note_analysis_pending.update(files)
+            return
+        self._note_worker = NoteAnalysisWorker(files, self.session.sample_rate, self)
+        self._note_worker.result.connect(self._on_note_analysis_result)
+        self._note_worker.finished.connect(self._on_note_analysis_finished)
+        self._note_worker.start()
+
+    def _stop_note_worker(self) -> None:
+        if self._note_worker and self._note_worker.isRunning():
+            self._note_worker.requestInterruption()
+            self._note_worker.wait(2000)
+        self._note_worker = None
+        self._note_analysis_pending.clear()
+
+    def _on_note_analysis_result(self, path: str, mtime: float, note: str) -> None:
+        self._sung_note_cache[path] = (mtime, note)
+        if not self.session:
+            return
+        target_note = self._target_bgm_note()
+        if not target_note:
+            return
+        for row, item in enumerate(self.session.items):
+            if not item.wav_path:
+                continue
+            abs_path = Path(item.wav_path)
+            if not abs_path.is_absolute():
+                abs_path = self.session.session_dir() / abs_path
+            if str(abs_path) == path:
+                self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(self._format_note_check(target_note, note)))
+                break
+
+    def _on_note_analysis_finished(self) -> None:
+        if self._note_analysis_pending:
+            files = list(self._note_analysis_pending)
+            self._note_analysis_pending.clear()
+            if self.session:
+                self._note_worker = NoteAnalysisWorker(files, self.session.sample_rate, self)
+                self._note_worker.result.connect(self._on_note_analysis_result)
+                self._note_worker.finished.connect(self._on_note_analysis_finished)
+                self._note_worker.start()
+
     def _update_visuals(self) -> None:
         if not self.audio.is_active():
             return
@@ -1844,17 +2180,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self.audio.preview and not self.audio.recording:
             wave = buffer
+            wave_sr = self.audio.sample_rate
         elif self.audio.recording:
             wave = self.audio.get_waveform_audio()
             if wave.size == 0:
                 wave = buffer
+                wave_sr = self.audio.sample_rate
+            else:
+                wave_sr = self.audio.get_waveform_sample_rate()
         elif self.selected_audio is not None and self.selected_audio.size:
             wave = self.selected_audio
+            wave_sr = self.audio.sample_rate
         else:
             wave = self.audio.get_waveform_audio()
             if wave.size == 0:
                 wave = buffer
-        wave_x = np.linspace(0, len(wave) / self.audio.sample_rate, len(wave))
+                wave_sr = self.audio.sample_rate
+            else:
+                wave_sr = self.audio.get_waveform_sample_rate()
+        wave_x = np.linspace(0, len(wave) / wave_sr, len(wave))
         if len(wave) > 20000:
             step = max(1, len(wave) // 20000)
             wave = wave[::step]
@@ -2236,6 +2580,64 @@ class MainWindow(QtWidgets.QMainWindow):
                 name = name[: -len(self.session.output_suffix)]
         return name.strip()
 
+    def _rename_recordings_for_prefix_suffix(
+        self,
+        new_prefix: str,
+        new_suffix: str,
+    ) -> tuple[bool, dict[str, str]]:
+        if not self.session:
+            return True, {}
+        mapping: dict[str, str] = {}
+        errors = False
+        temp_entries: list[tuple[Path, Path, Item, Path, Path]] = []
+        base = self.session.session_dir()
+        for item in self.session.items:
+            if not item.wav_path:
+                continue
+            old_rel = Path(item.wav_path)
+            old_abs = old_rel if old_rel.is_absolute() else base / old_rel
+            if not old_abs.exists():
+                continue
+            new_name = f"{new_prefix}{item.alias}{new_suffix}{old_abs.suffix}"
+            if old_rel.is_absolute():
+                new_rel = old_abs.with_name(new_name)
+                new_abs = new_rel
+            else:
+                new_rel = old_rel.with_name(new_name)
+                new_abs = base / new_rel
+            if new_abs == old_abs:
+                item.wav_path = str(new_rel)
+                mapping[str(old_abs)] = str(new_abs)
+                continue
+            if new_abs.exists():
+                errors = True
+                continue
+            temp_path = old_abs.with_name(f".tmp_rename_{uuid.uuid4().hex}{old_abs.suffix}")
+            try:
+                old_abs.replace(temp_path)
+            except Exception:
+                errors = True
+                continue
+            temp_entries.append((temp_path, new_abs, item, new_rel, old_abs))
+
+        for temp_path, new_abs, item, new_rel, old_abs in temp_entries:
+            try:
+                new_abs.parent.mkdir(parents=True, exist_ok=True)
+                if new_abs.exists():
+                    errors = True
+                    temp_path.replace(old_abs)
+                    continue
+                temp_path.replace(new_abs)
+                item.wav_path = str(new_rel)
+                mapping[str(old_abs)] = str(new_abs)
+            except Exception:
+                errors = True
+                try:
+                    temp_path.replace(old_abs)
+                except Exception:
+                    pass
+        return (not errors), mapping
+
     def _set_status(self, message: str) -> None:
         self.status_bar.showMessage(message, 5000)
 
@@ -2250,5 +2652,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.audio.stop_bgm()
         except Exception:
             pass
+        self._stop_note_worker()
         self._autosave()
         super().closeEvent(event)
