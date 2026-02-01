@@ -1,21 +1,25 @@
 # UTAU Voicebank Recorder (MVP)
 
 Desktop recorder for UTAU voicebank sessions built with Python 3.11+ and PyQt6.
-It supports real recording workflows: sessions, reclists, voicebank import, BGM preview/recording, live analysis, and per‑item tasks.
+It supports real recording workflows: sessions, reclists, voicebank import, BGM preview/recording, live analysis, and per-item tasks.
 
 ## Features
 - Session management (save/open/autosave) with JSON state
 - Reclist import (dedupe, replace or append)
-- Voicebank import (multi‑bank support, oto.ini aware, prefix/suffix handling)
+- Voicebank import (multi-bank support, oto.ini aware, prefix/suffix handling)
 - BGM preview and BGM during recording
 - BGM overlay note (clean reference tone)
-- Crash‑safe recording (temp file → atomic rename)
+- Crash-safe recording (temp file -> atomic rename)
 - Portable project: copies reclist and BGM into session folder
-- Live waveform/spectrum/power/F0 + recorded F0 & mel spectrogram
-- Click waveform to play with playhead
-- Romaji auto‑generation (mora segmented)
-- Multi‑language UI (English / Русский / 日本語)
+- Live waveform/spectrum/power + recorded F0 and mel spectrogram
+- Click waveform to play with playhead (also available on other charts)
+- Romaji auto-generation (mora segmented)
+- Multi-language UI (English / Russian / Japanese)
 - Event log for session actions
+- Note analysis cache on disk for fast reloads
+- Note analysis workers (parallel processing)
+- Pitch algorithm selector for charts + note (Classic / YIN)
+- Context menu: Recompute Note for a single sample
 - Optional VST batch processing with plugin chains, presets, and backups
 
 ## Requirements
@@ -55,6 +59,8 @@ python main.py
 Backups are created next to each recording folder:
 `_backup_vst_YYYYMMDD_HHMMSS`
 
+Analysis cache is stored per session:
+`<session>/_analysis_cache/`
 
 ## Tests
 ```bash
@@ -72,7 +78,7 @@ main.py     entry point
 ```
 
 ## Workflow
-1) **File → New Session**
+1) **File -> New Session**
    - If path is empty, a default folder is created: `recordings/<singer>/<session>`
    - Output prefix/suffix can be set at creation
 
@@ -83,12 +89,13 @@ main.py     entry point
    - **Generate BGM Note**: choose replace or overlay
 
 3) **Record**
-   - Select item → Record / Stop / Re‑record
+   - Select item -> Record / Stop / Re-record
    - BGM can play during recording
 
 4) **Review**
    - Click waveform to play, playhead shows position
-   - Selecting an item shows its waveform & analysis
+   - Selecting an item shows its waveform and analysis
+   - Right-click a row -> **Recompute Note** to re-run pitch for a single sample
 
 ## Session Folder (Portable)
 ```
@@ -101,7 +108,7 @@ main.py     entry point
 ```
 
 ## Notes
-- If `sounddevice` can’t find devices, ensure PortAudio is installed and audio drivers are working.
+- If `sounddevice` cannot find devices, ensure PortAudio is installed and audio drivers are working.
 - Voicebank BGM mapping uses `oto.ini` when present, and falls back to WAV filenames.
 - Overlay tone is a clean sine (no vibrato).
 - The optional VST hosts are implemented with JUCE and must be built separately (see `vst_host/README.txt`).
