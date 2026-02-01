@@ -177,6 +177,7 @@ static bool applyPreset(AudioPluginInstance& instance, const String& presetPath)
         return false;
 
     instance.setStateInformation(data.getData(), static_cast<int>(data.getSize()));
+    instance.reset();
     return true;
 }
 
@@ -256,6 +257,7 @@ int main(int argc, char* argv[])
 #endif
 
     OwnedArray<AudioPluginInstance> instances;
+    int totalLatency = 0;
     for (const auto& slot : slots)
     {
         if (slot.bypass)
@@ -282,6 +284,7 @@ int main(int argc, char* argv[])
             if (!applyPreset(*instance, slot.presetPath))
                 std::cerr << "Warning: failed to apply preset " << slot.presetPath << "\n";
         }
+        totalLatency += jmax(0, instance->getLatencySamples());
         instances.add(instance.release());
     }
 
@@ -323,17 +326,80 @@ int main(int argc, char* argv[])
     AudioBuffer<float> buffer(numChannels, args.blockSize);
     MidiBuffer midi;
     int64 position = 0;
+    const int extraTailSamples = static_cast<int>(reader->sampleRate);
+    const int fadeSamples = jmax(1, static_cast<int>(reader->sampleRate * 0.005));
+    int dropRemaining = totalLatency;
+    int64 tailRemaining = static_cast<int64>(totalLatency + extraTailSamples);
+    int64 outWritten = 0;
+    const int64 totalOutSamples = totalSamples + extraTailSamples;
+
+    auto writeBlock = [&](int start, int available) {
+        if (available <= 0)
+            return;
+        const int64 outStart = outWritten;
+        const int64 outEnd = outWritten + available;
+        const int64 fadeStart = totalOutSamples - fadeSamples;
+        const bool needsFadeIn = (fadeSamples > 0 && outStart < fadeSamples);
+        const bool needsFadeOut = (fadeSamples > 0 && outEnd > fadeStart);
+        if (needsFadeIn || needsFadeOut)
+        {
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            {
+                float* data = buffer.getWritePointer(ch, start);
+                for (int i = 0; i < available; ++i)
+                {
+                    const int64 global = outStart + i;
+                    float gain = 1.0f;
+                    if (needsFadeIn && global < fadeSamples)
+                        gain *= static_cast<float>(global + 1) / static_cast<float>(fadeSamples);
+                    if (needsFadeOut && global >= fadeStart)
+                        gain *= 1.0f - static_cast<float>(global - fadeStart) / static_cast<float>(fadeSamples);
+                    if (gain < 0.0f)
+                        gain = 0.0f;
+                    data[i] *= gain;
+                }
+            }
+        }
+        writer->writeFromAudioSampleBuffer(buffer, start, available);
+        outWritten += available;
+    };
+
+    auto writeProcessed = [&](int blockSamples) {
+        int start = 0;
+        int available = blockSamples;
+        if (dropRemaining > 0)
+        {
+            const int drop = jmin(dropRemaining, available);
+            start += drop;
+            available -= drop;
+            dropRemaining -= drop;
+        }
+        writeBlock(start, available);
+    };
 
     while (position < totalSamples)
     {
         const int block = static_cast<int>(jmin<int64>(args.blockSize, totalSamples - position));
+        buffer.setSize(numChannels, block, false, false, true);
         buffer.clear();
         reader->read(&buffer, 0, block, position, true, true);
         midi.clear();
         for (auto* instance : instances)
             instance->processBlock(buffer, midi);
-        writer->writeFromAudioSampleBuffer(buffer, 0, block);
+        writeProcessed(block);
         position += block;
+    }
+
+    while (tailRemaining > 0)
+    {
+        const int block = static_cast<int>(jmin<int64>(args.blockSize, tailRemaining));
+        buffer.setSize(numChannels, block, false, false, true);
+        buffer.clear();
+        midi.clear();
+        for (auto* instance : instances)
+            instance->processBlock(buffer, midi);
+        writeProcessed(block);
+        tailRemaining -= block;
     }
 
     return 0;
