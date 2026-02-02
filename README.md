@@ -20,6 +20,9 @@ It supports real recording workflows: sessions, reclists, voicebank import, BGM 
 - Note analysis workers (parallel processing)
 - Pitch algorithm selector for charts + note (Classic / YIN)
 - Context menu: Recompute Note for a single sample
+- Metronome BGM generator (BPM-based)
+- Hold-to-record (OREMO style) and spacebar play/pause
+- Multi-select table actions with Delete (Shift+Delete removes files)
 - Optional VST batch processing with plugin chains, presets, and backups
 
 ## Requirements
@@ -62,6 +65,16 @@ Backups are created next to each recording folder:
 Analysis cache is stored per session:
 `<session>/_analysis_cache/`
 
+## Shortcuts
+- Ctrl/Cmd+N: New session
+- Ctrl/Cmd+I: Import reclist
+- Ctrl/Cmd+O: Open session folder
+- Ctrl/Cmd+R: Session settings
+- Ctrl/Cmd+B: Back / Exit
+- Ctrl+Shift+E: Export voicebank
+- Space: Play / Pause selected sample
+- Hold R (or Russian "к") to record when enabled in UI settings
+
 ## Tests
 ```bash
 python -m unittest tests/test_parsers.py
@@ -96,6 +109,7 @@ main.py     entry point
    - Click waveform to play, playhead shows position
    - Selecting an item shows its waveform and analysis
    - Right-click a row -> **Recompute Note** to re-run pitch for a single sample
+   - Select multiple rows and press Delete (Shift+Delete removes files)
 
 ## Session Folder (Portable)
 ```

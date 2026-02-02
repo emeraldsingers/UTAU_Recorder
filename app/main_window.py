@@ -48,7 +48,7 @@ from app.vst_batch import VstBatchDialog
 logger = logging.getLogger(__name__)
 
 APP_NAME = "AsoCorder"
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.4"
 GITHUB_OWNER = "emeraldsingers"
 GITHUB_REPO = "UTAU_Recorder"
 GITHUB_PROFILE_URL = "https://github.com/emeraldsingers"
@@ -257,6 +257,11 @@ TRANSLATIONS = {
         "save_session": "Save Session",
         "save_as": "Save Session As",
         "export_recordings": "Export Recordings JSON",
+        "open_folder": "Open Session Folder",
+        "export_voicebank": "Export Voicebank",
+        "export_voicebank_title": "Export Voicebank",
+        "export_voicebank_done": "Voicebank exported.",
+        "back_exit": "Back / Exit",
         "save_reclist_to": "Save Reclist To",
         "import_reclist": "Import Reclist",
         "import_voicebank": "Import Voicebank",
@@ -426,9 +431,14 @@ TRANSLATIONS = {
         "save_session": "Сохранить сессию",
         "save_as": "Сохранить как",
         "export_recordings": "Экспорт записей JSON",
+        "open_folder": "Открыть папку сессии",
+        "export_voicebank": "Экспорт войсбанка",
+        "export_voicebank_title": "Экспорт войсбанка",
+        "export_voicebank_done": "Войсбанк экспортирован.",
+        "back_exit": "Назад / Выход",
         "save_reclist_to": "Сохранить реклист как",
         "import_reclist": "Импорт реклиста",
-        "import_voicebank": "Импорт voicebank",
+        "import_voicebank": "Импорт войсбанка",
         "import_bgm": "Импорт BGM WAV",
         "generate_bgm": "Сгенерировать BGM ноту",
         "audio_devices": "Аудиоустройства",
@@ -547,6 +557,11 @@ TRANSLATIONS = {
         "save_session": "セッションを保存",
         "save_as": "名前を付けて保存",
         "export_recordings": "録音一覧JSONを書き出し",
+        "open_folder": "セッションフォルダを開く",
+        "export_voicebank": "音源を書き出す",
+        "export_voicebank_title": "音源を書き出す",
+        "export_voicebank_done": "音源を書き出しました。",
+        "back_exit": "戻る / 終了",
         "save_reclist_to": "レコリストを書き出し",
         "import_reclist": "レコリストをインポート",
         "import_voicebank": "音源をインポート",
@@ -1756,13 +1771,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.new_action = self.file_menu.addAction(tr(self.ui_language, "new_session"))
         self.open_action = self.file_menu.addAction(tr(self.ui_language, "open_session"))
+        self.open_folder_action = self.file_menu.addAction(tr(self.ui_language, "open_folder"))
         self.save_action = self.file_menu.addAction(tr(self.ui_language, "save_session"))
         self.save_as_action = self.file_menu.addAction(tr(self.ui_language, "save_as"))
         self.export_action = self.file_menu.addAction(tr(self.ui_language, "export_recordings"))
+        self.export_voicebank_action = self.file_menu.addAction(tr(self.ui_language, "export_voicebank"))
         self.save_reclist_action = self.file_menu.addAction(tr(self.ui_language, "save_reclist_to"))
         self.file_menu.addSeparator()
         self.recent_menu = self.file_menu.addMenu(tr(self.ui_language, "recent_sessions"))
         self._rebuild_recent_menu()
+        self.file_menu.addSeparator()
+        self.back_action = self.file_menu.addAction(tr(self.ui_language, "back_exit"))
 
         self.import_menu = menu.addMenu(tr(self.ui_language, "import"))
         self.import_reclist_action = self.import_menu.addAction(tr(self.ui_language, "import_reclist"))
@@ -1782,6 +1801,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_menu = menu.addMenu(tr(self.ui_language, "edit"))
         self.undo_action = self.edit_menu.addAction(tr(self.ui_language, "undo"))
         self.undo_action.setShortcut(QtGui.QKeySequence.StandardKey.Undo)
+        self.new_action.setShortcut(QtGui.QKeySequence.StandardKey.New)
+        self.save_action.setShortcut(QtGui.QKeySequence.StandardKey.Save)
+        self.import_reclist_action.setShortcut(QtGui.QKeySequence("Ctrl+I"))
+        self.open_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+O"))
+        self.open_folder_action.setShortcut(QtGui.QKeySequence("Ctrl+O"))
+        self.session_settings_action.setShortcut(QtGui.QKeySequence("Ctrl+R"))
+        self.export_voicebank_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+E"))
+        self.back_action.setShortcut(QtGui.QKeySequence("Ctrl+B"))
 
         self.help_menu = menu.addMenu(tr(self.ui_language, "help"))
         self.about_action = self.help_menu.addAction(tr(self.ui_language, "about"))
@@ -1789,10 +1816,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _connect_actions(self) -> None:
         self.new_action.triggered.connect(self._new_session)
         self.open_action.triggered.connect(self._open_session)
+        self.open_folder_action.triggered.connect(self._open_session_folder)
         self.save_action.triggered.connect(self._save_session)
         self.save_as_action.triggered.connect(self._save_as_session)
         self.export_action.triggered.connect(self._export_recordings)
+        self.export_voicebank_action.triggered.connect(self._export_voicebank)
         self.save_reclist_action.triggered.connect(self._save_reclist_as)
+        self.back_action.triggered.connect(self._back_or_exit)
 
         self.import_reclist_action.triggered.connect(self._import_reclist)
         self.import_voicebank_action.triggered.connect(self._import_voicebank)
@@ -2290,6 +2320,61 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog = VstBatchDialog(lambda key: tr(self.ui_language, key), self.settings, self.session, self)
         dialog.exec()
 
+    def _back_or_exit(self) -> None:
+        self.close()
+
+    def _open_session_folder(self) -> None:
+        if not self.session:
+            return
+        folder = self.session.session_dir()
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
+
+    @staticmethod
+    def _sanitize_folder_name(name: str) -> str:
+        bad = '<>:"/\\|?*'
+        cleaned = "".join("_" if ch in bad else ch for ch in name).strip()
+        return cleaned or "voicebank"
+
+    def _export_voicebank(self) -> None:
+        if not self.session:
+            return
+        base = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            tr(self.ui_language, "export_voicebank_title"),
+            str(self.session.session_dir()),
+        )
+        if not base:
+            return
+        folder_name = self._sanitize_folder_name(f"{self.session.singer} {self.session.name}")
+        out_dir = Path(base) / folder_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # character.txt (minimal)
+        char_path = out_dir / "character.txt"
+        char_path.write_text(
+            f"name={self.session.singer}\n"
+            f"author={self.session.singer}\n"
+            f"comment={self.session.name}\n",
+            encoding="utf-8",
+        )
+
+        # copy recordings
+        for item in self.session.items:
+            if not item.wav_path:
+                continue
+            src = Path(item.wav_path)
+            if not src.is_absolute():
+                src = self.session.session_dir() / src
+            if not src.exists():
+                continue
+            shutil.copy2(src, out_dir / src.name)
+
+        QtWidgets.QMessageBox.information(
+            self,
+            tr(self.ui_language, "export_voicebank_title"),
+            tr(self.ui_language, "export_voicebank_done"),
+        )
+
     def _maybe_show_start_dialog(self) -> None:
         recent_entries = []
         for path in self.recent_sessions[:10]:
@@ -2452,8 +2537,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_action.setText(tr(self.ui_language, "save_session"))
         self.save_as_action.setText(tr(self.ui_language, "save_as"))
         self.export_action.setText(tr(self.ui_language, "export_recordings"))
+        self.open_folder_action.setText(tr(self.ui_language, "open_folder"))
+        self.export_voicebank_action.setText(tr(self.ui_language, "export_voicebank"))
         self.save_reclist_action.setText(tr(self.ui_language, "save_reclist_to"))
         self.recent_menu.setTitle(tr(self.ui_language, "recent_sessions"))
+        if hasattr(self, "back_action"):
+            self.back_action.setText(tr(self.ui_language, "back_exit"))
         self.import_reclist_action.setText(tr(self.ui_language, "import_reclist"))
         self.import_voicebank_action.setText(tr(self.ui_language, "import_voicebank"))
         self.import_bgm_action.setText(tr(self.ui_language, "import_bgm"))
