@@ -68,6 +68,21 @@ def _default_tool_path(name: str) -> str:
     return str(Path.cwd() / "tools" / exe)
 
 
+def _subprocess_creationflags() -> int:
+    if sys.platform == "win32":
+        return subprocess.CREATE_NO_WINDOW
+    return 0
+
+
+def _subprocess_startupinfo() -> Optional[subprocess.STARTUPINFO]:
+    if sys.platform != "win32":
+        return None
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = subprocess.SW_HIDE
+    return startup
+
+
 def _quote_path(path: str) -> str:
     cleaned = path.strip()
     if not cleaned:
@@ -177,6 +192,8 @@ class VstBatchWorker(QtCore.QThread):
                         encoding="utf-8",
                         errors="replace",
                         check=False,
+                        creationflags=_subprocess_creationflags(),
+                        startupinfo=_subprocess_startupinfo(),
                     )
                     log_path = log_paths.get(file_path.parent)
                     timestamp = datetime.now().isoformat(timespec="seconds")
@@ -613,6 +630,8 @@ class VstMixerPage(QtWidgets.QWidget):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                creationflags=_subprocess_creationflags(),
+                startupinfo=_subprocess_startupinfo(),
             )
             self._gui_processes.append(proc)
             QtCore.QTimer.singleShot(500, lambda: self._check_gui_process(proc))
