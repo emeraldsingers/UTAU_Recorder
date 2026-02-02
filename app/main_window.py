@@ -48,11 +48,12 @@ from app.vst_batch import VstBatchDialog
 logger = logging.getLogger(__name__)
 
 APP_NAME = "AsoCorder"
-APP_VERSION = "0.3"
+APP_VERSION = "0.3.1"
 GITHUB_OWNER = "emeraldsingers"
 GITHUB_REPO = "UTAU_Recorder"
 GITHUB_PROFILE_URL = "https://github.com/emeraldsingers"
 GITHUB_RELEASES_URL = "https://github.com/emeraldsingers/UTAU_Recorder/releases"
+GITHUB_URL = "https://github.com/emeraldsingers/UTAU_Recorder"
 YOUTUBE_URL = "https://www.youtube.com/@asoqwer"
 
 
@@ -1071,11 +1072,16 @@ class StartDialog(QtWidgets.QDialog):
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
 
-        about_row = QtWidgets.QHBoxLayout()
-        about_row.addStretch(1)
-        self.about_btn = QtWidgets.QPushButton(tr(self.lang, "about"))
-        about_row.addWidget(self.about_btn)
-        layout.addLayout(about_row)
+        footer = QtWidgets.QLabel(
+            f'{APP_NAME} (v{APP_VERSION}) <a href="{GITHUB_URL}">{GITHUB_URL}</a>'
+        )
+        footer.setStyleSheet("color: #888888; font-size: 10px;")
+        footer.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        footer.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextBrowserInteraction)
+        footer.setOpenExternalLinks(True)
+        footer.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(footer)
+
 
         self.new_btn.clicked.connect(self._new_clicked)
         self.open_btn.clicked.connect(self._open_clicked)
@@ -1085,7 +1091,6 @@ class StartDialog(QtWidgets.QDialog):
         close_action.triggered.connect(self.reject)
         ui_action.triggered.connect(self._ui_clicked)
         about_action.triggered.connect(self._about_clicked)
-        self.about_btn.clicked.connect(self._about_clicked)
 
         self.action: Optional[str] = None
         self.selected_path: Optional[str] = None
@@ -1526,6 +1531,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_language()
         self._apply_theme()
         self._maybe_show_start_dialog()
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
         self.visual_timer = QtCore.QTimer(self)
         self.visual_timer.setInterval(80)
@@ -1548,6 +1556,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.play_start_time: Optional[QtCore.QElapsedTimer] = None
         self.play_start_pos = 0.0
         self.play_duration = 0.0
+        self._paused_audio: Optional[np.ndarray] = None
+        self._paused_pos = 0.0
+        self._paused_sr = 0
         self.selected_audio: Optional[np.ndarray] = None
         self.undo_stack: list[list[dict]] = []
         self._suppress_item_changed = False
@@ -3050,6 +3061,22 @@ class MainWindow(QtWidgets.QMainWindow):
         widget = QtWidgets.QApplication.focusWidget()
         if widget is None:
             return True
+        if self.table:
+            if self.table.state() == QtWidgets.QAbstractItemView.State.EditingState:
+                return False
+            if widget and self.table.isAncestorOf(widget):
+                if isinstance(
+                    widget,
+                    (
+                        QtWidgets.QLineEdit,
+                        QtWidgets.QTextEdit,
+                        QtWidgets.QPlainTextEdit,
+                        QtWidgets.QSpinBox,
+                        QtWidgets.QDoubleSpinBox,
+                        QtWidgets.QComboBox,
+                    ),
+                ):
+                    return False
         if isinstance(
             widget,
             (
@@ -3064,61 +3091,138 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return True
 
-    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
-        if event.isAutoRepeat():
-            super().keyPressEvent(event)
-            return
+    def _handle_key_press(self, event: QtGui.QKeyEvent) -> bool:
+        if event.key() == QtCore.Qt.Key.Key_Escape:
+            if self.table:
+                editor = self.table.focusWidget()
+                if editor and editor.parent() is self.table:
+                    self.table.closeEditor(editor, QtWidgets.QAbstractItemDelegate.EndEditHint.NoHint)
+                self.table.clearSelection()
+                self.table.setCurrentItem(None)
+                self.table.clearFocus()
+            event.accept()
+            return True
         if not self._should_handle_shortcuts():
-            super().keyPressEvent(event)
-            return
+            return False
         key = event.key()
+        text = (event.text() or "").lower()
         if key == QtCore.Qt.Key.Key_Space:
             if not self.audio.recording and not self.audio.preview:
+                if self.playing:
+                    if self.play_start_time is not None:
+                        elapsed = self.play_start_time.elapsed() / 1000.0
+                        self._paused_pos = max(0.0, self.play_start_pos + elapsed)
+                    else:
+                        self._paused_pos = 0.0
+                    self._paused_audio = (
+                        self.selected_audio if self.selected_audio is not None else self.audio.get_waveform_audio()
+                    )
+                    self._paused_sr = self.audio.sample_rate
+                    sd.stop()
+                    self.playing = False
+                    self.playhead.setPos(self._paused_pos)
+                    event.accept()
+                    return True
+                if self._paused_audio is not None and self._paused_sr:
+                    duration = len(self._paused_audio) / self._paused_sr if self._paused_audio.size else 0.0
+                    if duration and self._paused_pos >= max(0.0, duration - 0.01):
+                        self._paused_audio = None
+                        self._paused_pos = 0.0
+                        self._paused_sr = 0
+                    else:
+                        self._play_audio_from(self._paused_audio, self._paused_pos, self._paused_sr)
+                        event.accept()
+                        return True
+                    event.accept()
+                    return True
                 if self.current_item and self.current_item.wav_path:
                     if self.selected_audio is None or getattr(self.selected_audio, "size", 0) == 0:
                         self._analyze_selected_item()
                     self._play_recorded_from(0.0)
                 event.accept()
-                return
-        if key == QtCore.Qt.Key.Key_R and self.hold_to_record:
+                return True
+        if key == QtCore.Qt.Key.Key_Delete:
+            delete_files = bool(
+                QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier
+            )
+            self._delete_selected_entries(delete_files=delete_files)
+            event.accept()
+            return True
+        if (key == QtCore.Qt.Key.Key_R or text in ("r", "к")) and self.hold_to_record:
             if not self.audio.recording and not self.audio.preview:
+                if self.table:
+                    editor = self.table.focusWidget()
+                    if editor and editor.parent() is self.table:
+                        self.table.closeEditor(
+                            editor,
+                            QtWidgets.QAbstractItemDelegate.EndEditHint.NoHint,
+                        )
                 self._hold_record_active = True
                 self._record()
                 event.accept()
-                return
+                return True
+        return False
+
+    def _handle_key_release(self, event: QtGui.QKeyEvent) -> bool:
+        key = event.key()
+        text = (event.text() or "").lower()
+        if (key == QtCore.Qt.Key.Key_R or text in ("r", "к")) and self.hold_to_record:
+            if self._hold_record_active:
+                self._hold_record_active = False
+                if self.audio.recording:
+                    self._stop()
+            event.accept()
+            return True
+        return False
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.isAutoRepeat():
+            super().keyPressEvent(event)
+            return
+        if self._handle_key_press(event):
+            return
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event: QtGui.QKeyEvent) -> None:
         if event.isAutoRepeat():
             super().keyReleaseEvent(event)
             return
-        key = event.key()
-        if key == QtCore.Qt.Key.Key_R and self.hold_to_record:
-            if self._hold_record_active:
-                self._hold_record_active = False
-                if self.audio.recording:
-                    self._stop()
-            event.accept()
+        if self._handle_key_release(event):
             return
         super().keyReleaseEvent(event)
 
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() == QtCore.QEvent.Type.KeyPress:
+            if not event.isAutoRepeat() and self._handle_key_press(event):
+                return True
+        elif event.type() == QtCore.QEvent.Type.KeyRelease:
+            if not event.isAutoRepeat() and self._handle_key_release(event):
+                return True
+        return super().eventFilter(obj, event)
+
     def _play_recorded_from(self, start_sec: float) -> None:
         audio = self.selected_audio if self.selected_audio is not None else self.audio.get_waveform_audio()
+        self._paused_audio = None
+        self._paused_pos = 0.0
+        self._paused_sr = 0
+        self._play_audio_from(audio, start_sec, self.audio.sample_rate)
+
+    def _play_audio_from(self, audio: np.ndarray, start_sec: float, sr: int) -> None:
         if audio.size == 0:
             return
-        start_sample = int(start_sec * self.audio.sample_rate)
+        start_sample = int(start_sec * sr)
         start_sample = max(0, min(start_sample, len(audio) - 1))
         output_device = None
         if self.audio.device is not None:
             output_device = self.audio.device[1]
         try:
             sd.stop()
-            sd.play(audio[start_sample:], samplerate=self.audio.sample_rate, device=output_device)
+            sd.play(audio[start_sample:], samplerate=sr, device=output_device)
             self.playing = True
             self.play_start_time = QtCore.QElapsedTimer()
             self.play_start_time.start()
-            self.play_start_pos = start_sample / self.audio.sample_rate
-            self.play_duration = (len(audio) - start_sample) / self.audio.sample_rate
+            self.play_start_pos = start_sample / sr
+            self.play_duration = (len(audio) - start_sample) / sr
             self.playhead.setVisible(True)
             self.playhead.setPos(self.play_start_pos)
         except Exception as exc:
@@ -3144,6 +3248,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mel_playhead.setPos(pos)
         if elapsed >= self.play_duration:
             self.playing = False
+            self._paused_audio = None
+            self._paused_pos = 0.0
+            self._paused_sr = 0
             if hasattr(self, "spec_playhead"):
                 self.spec_playhead.setVisible(False)
             if hasattr(self, "power_playhead"):
@@ -3157,6 +3264,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.playing:
             sd.stop()
         self.playing = False
+        self._paused_audio = None
+        self._paused_pos = 0.0
+        self._paused_sr = 0
         if hasattr(self, "spec_playhead"):
             self.spec_playhead.setVisible(False)
         if hasattr(self, "power_playhead"):
@@ -3440,6 +3550,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.selected_audio = None
             self._clear_analysis()
             return
+        self._paused_audio = None
+        self._paused_pos = 0.0
+        self._paused_sr = 0
         abs_path = self.session.session_dir() / self.current_item.wav_path
         if not abs_path.exists():
             self.selected_audio = None
@@ -3510,7 +3623,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if action == add_action:
             self._add_entry()
         elif action == delete_action:
-            self._delete_selected_entries()
+            delete_files = bool(
+                QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier
+            )
+            self._delete_selected_entries(delete_files=delete_files)
         elif action == recompute_action:
             self._recompute_note_for_selection()
 
@@ -3567,29 +3683,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 model_rows.append(model_index)
         return sorted(set(model_rows))
 
-    def _delete_selected_entries(self) -> None:
+    def _delete_selected_entries(self, delete_files: bool = False) -> None:
         if not self.session:
             return
         indices = self._selected_model_indices()
         if not indices:
             return
-        count = len(indices)
-        prompt = tr(self.ui_language, "delete_selected_prompt").format(count=count)
-        reply = QtWidgets.QMessageBox.question(
-            self,
-            tr(self.ui_language, "delete_selected_title"),
-            prompt,
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-            QtWidgets.QMessageBox.StandardButton.No,
-        )
-        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
-            return
+        if delete_files:
+            count = len(indices)
+            prompt = tr(self.ui_language, "delete_selected_prompt").format(count=count)
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                tr(self.ui_language, "delete_selected_title"),
+                prompt,
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
         self._push_undo_state()
         for idx in sorted(indices, reverse=True):
             if idx < 0 or idx >= len(self.session.items):
                 continue
             item = self.session.items[idx]
-            if item.wav_path:
+            if delete_files and item.wav_path:
                 abs_path = Path(item.wav_path)
                 if not abs_path.is_absolute():
                     abs_path = self.session.session_dir() / abs_path
