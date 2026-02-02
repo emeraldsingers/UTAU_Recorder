@@ -61,6 +61,7 @@ class Session:
     voicebank_prefix: str = ""
     voicebank_suffix: str = ""
     voicebank_use_bgm: bool = False
+    voicebank_oto_strip_aliases: bool = False
     output_prefix: str = ""
     output_suffix: str = ""
     bgm_wav_path: Optional[str] = None
@@ -96,6 +97,7 @@ class Session:
             "voicebank_prefix": self.voicebank_prefix,
             "voicebank_suffix": self.voicebank_suffix,
             "voicebank_use_bgm": self.voicebank_use_bgm,
+            "voicebank_oto_strip_aliases": self.voicebank_oto_strip_aliases,
             "output_prefix": self.output_prefix,
             "output_suffix": self.output_suffix,
             "bgm_wav_path": self.bgm_wav_path,
@@ -122,6 +124,7 @@ class Session:
             voicebank_prefix=data.get("voicebank_prefix", ""),
             voicebank_suffix=data.get("voicebank_suffix", ""),
             voicebank_use_bgm=data.get("voicebank_use_bgm", False),
+            voicebank_oto_strip_aliases=data.get("voicebank_oto_strip_aliases", False),
             output_prefix=data.get("output_prefix", ""),
             output_suffix=data.get("output_suffix", ""),
             bgm_wav_path=data.get("bgm_wav_path"),

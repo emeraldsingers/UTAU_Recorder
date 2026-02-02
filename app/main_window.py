@@ -438,6 +438,8 @@ TRANSLATIONS = {
         "language_title": "Language",
         "voicebank_options": "Voicebank Import Options",
         "use_vb_bgm": "Use voicebank samples as BGM (per alias)",
+        "copy_oto": "Copy oto.ini to session",
+        "strip_oto_alias": "Strip prefix/suffix from oto aliases",
         "bgm_mode_title": "BGM Note",
         "bgm_note": "Note (e.g. A4)",
         "bgm_duration": "Duration (sec)",
@@ -597,6 +599,8 @@ TRANSLATIONS = {
         "language_title": "Язык",
         "voicebank_options": "Опции импорта voicebank",
         "use_vb_bgm": "Использовать семплы voicebank как BGM (по алиасу)",
+        "copy_oto": "Копировать oto.ini в сессию",
+        "strip_oto_alias": "Убрать префикс/суффикс у алиасов oto",
         "bgm_mode_title": "BGM нота",
         "bgm_note": "Нота (например A4)",
         "bgm_duration": "Длительность (сек)",
@@ -756,6 +760,8 @@ TRANSLATIONS = {
         "language_title": "言語",
         "voicebank_options": "音源インポート設定",
         "use_vb_bgm": "音源サンプルをBGMとして使用 (エイリアス毎)",
+        "copy_oto": "oto.iniをセッションにコピー",
+        "strip_oto_alias": "otoのエイリアスから接頭/接尾を除去",
         "bgm_mode_title": "BGMノート",
         "bgm_note": "ノート (例 A4)",
         "bgm_duration": "長さ (秒)",
@@ -1115,6 +1121,12 @@ class VoicebankImportDialog(QtWidgets.QDialog):
         self.use_bgm_checkbox = QtWidgets.QCheckBox(tr(self.lang, "use_vb_bgm"))
         self.use_bgm_checkbox.setChecked(True)
         layout.addWidget(self.use_bgm_checkbox)
+        self.copy_oto_checkbox = QtWidgets.QCheckBox(tr(self.lang, "copy_oto"))
+        self.copy_oto_checkbox.setChecked(True)
+        layout.addWidget(self.copy_oto_checkbox)
+        self.strip_oto_checkbox = QtWidgets.QCheckBox(tr(self.lang, "strip_oto_alias"))
+        self.strip_oto_checkbox.setChecked(False)
+        layout.addWidget(self.strip_oto_checkbox)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -1126,6 +1138,12 @@ class VoicebankImportDialog(QtWidgets.QDialog):
 
     def use_bgm(self) -> bool:
         return self.use_bgm_checkbox.isChecked()
+
+    def copy_oto(self) -> bool:
+        return self.copy_oto_checkbox.isChecked()
+
+    def strip_oto_aliases(self) -> bool:
+        return self.strip_oto_checkbox.isChecked()
 
 
 class StartDialog(QtWidgets.QDialog):
@@ -2150,6 +2168,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         use_bgm = dialog.use_bgm()
+        copy_oto = dialog.copy_oto()
+        strip_oto_aliases = dialog.strip_oto_aliases()
         try:
             prefix = prefix.strip()
             suffix = suffix.strip()
@@ -2169,6 +2189,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.session.voicebank_prefix = prefix
             self.session.voicebank_suffix = suffix
             self.session.voicebank_use_bgm = use_bgm
+            self.session.voicebank_oto_strip_aliases = strip_oto_aliases
             if use_bgm:
                 self.session.bgm_override = False
             self._save_session()
@@ -2180,6 +2201,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self.voicebank_samples = {}
+            if use_bgm and copy_oto:
+                self._copy_and_adjust_oto(
+                    folder_path / "oto.ini",
+                    self.session.session_dir() / "oto.ini",
+                    remove_prefix=prefix,
+                    remove_suffix=suffix,
+                    add_prefix=self.session.output_prefix,
+                    add_suffix=self.session.output_suffix,
+                    strip_aliases=strip_oto_aliases,
+                )
             self._log_event("import_voicebank", folder_path.name)
         except Exception as exc:
             logger.exception("Voicebank import failed")
@@ -2608,6 +2639,123 @@ class MainWindow(QtWidgets.QMainWindow):
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
 
     @staticmethod
+    def _adjust_name(value: str, remove_prefix: str, remove_suffix: str, add_prefix: str, add_suffix: str) -> str:
+        base = value
+        if remove_prefix and base.startswith(remove_prefix):
+            base = base[len(remove_prefix):]
+        if remove_suffix and base.endswith(remove_suffix):
+            base = base[: -len(remove_suffix)]
+        return f"{add_prefix}{base}{add_suffix}"
+
+    @staticmethod
+    def _detect_text_encoding(path: Path) -> str:
+        raw = path.read_bytes()
+        if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+            return "utf-16"
+        if raw.startswith(b"\xef\xbb\xbf"):
+            return "utf-8-sig"
+        for enc in (
+            "utf-8",
+            "utf-8-sig",
+            "utf-16",
+            "utf-16-le",
+            "utf-16-be",
+            "cp932",
+            "shift_jis",
+            "euc_jp",
+            "gbk",
+            "cp936",
+            "big5",
+            "cp950",
+            "euc_kr",
+        ):
+            try:
+                raw.decode(enc)
+                return enc
+            except UnicodeDecodeError:
+                continue
+        return "utf-8"
+
+    def _copy_and_adjust_oto(
+        self,
+        src_path: Path,
+        dst_path: Path,
+        remove_prefix: str,
+        remove_suffix: str,
+        add_prefix: str,
+        add_suffix: str,
+        strip_aliases: bool,
+    ) -> None:
+        if not src_path.exists():
+            return
+        encoding_in = self._detect_text_encoding(src_path)
+        lines = src_path.read_text(encoding=encoding_in, errors="replace").splitlines()
+        out_lines = []
+        for line in lines:
+            raw = line.strip()
+            if not raw or raw.startswith("#") or "=" not in raw:
+                out_lines.append(line)
+                continue
+            left, right = raw.split("=", 1)
+            filename = left.strip()
+            rest = right
+            alias = ""
+            if "," in rest:
+                alias, rest_tail = rest.split(",", 1)
+                alias = alias.strip()
+                rest = rest_tail
+            stem = Path(filename).stem
+            ext = Path(filename).suffix
+            new_stem = self._adjust_name(stem, remove_prefix, remove_suffix, add_prefix, add_suffix)
+            new_filename = f"{new_stem}{ext}"
+            if strip_aliases and alias:
+                alias = self._adjust_name(alias, remove_prefix, remove_suffix, "", "")
+            new_line = f"{new_filename}={alias}"
+            if rest:
+                new_line = f"{new_line},{rest}"
+            out_lines.append(new_line)
+        try:
+            dst_path.write_text("\n".join(out_lines), encoding=encoding_in, errors="strict")
+        except UnicodeEncodeError:
+            dst_path.write_text("\n".join(out_lines), encoding="utf-8", errors="replace")
+
+    def _copy_and_adjust_oto_alias(
+        self,
+        src_path: Path,
+        dst_path: Path,
+        add_prefix: str,
+        add_suffix: str,
+    ) -> None:
+        if not src_path.exists():
+            return
+        encoding_in = self._detect_text_encoding(src_path)
+        lines = src_path.read_text(encoding=encoding_in, errors="replace").splitlines()
+        out_lines = []
+        for line in lines:
+            raw = line.strip()
+            if not raw or raw.startswith("#") or "=" not in raw:
+                out_lines.append(line)
+                continue
+            left, right = raw.split("=", 1)
+            filename = left.strip()
+            rest = right
+            alias = ""
+            if "," in rest:
+                alias, rest_tail = rest.split(",", 1)
+                alias = alias.strip()
+                rest = rest_tail
+            if alias:
+                alias = self._adjust_name(alias, "", "", add_prefix, add_suffix)
+            new_line = f"{filename}={alias}"
+            if rest:
+                new_line = f"{new_line},{rest}"
+            out_lines.append(new_line)
+        try:
+            dst_path.write_text("\n".join(out_lines), encoding=encoding_in, errors="strict")
+        except UnicodeEncodeError:
+            dst_path.write_text("\n".join(out_lines), encoding="utf-8", errors="replace")
+
+    @staticmethod
     def _sanitize_folder_name(name: str) -> str:
         bad = '<>:"/\\|?*'
         cleaned = "".join("_" if ch in bad else ch for ch in name).strip()
@@ -2639,6 +2787,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         src_vb = self.session.session_dir()
         if src_vb and src_vb.exists():
+            oto_src = self.session.session_dir() / "oto.ini"
+            if oto_src.exists():
+                if self.session.voicebank_oto_strip_aliases:
+                    self._copy_and_adjust_oto_alias(
+                        oto_src,
+                        out_dir / "oto.ini",
+                        add_prefix=self.session.output_prefix,
+                        add_suffix=self.session.output_suffix,
+                    )
+                else:
+                    shutil.copy2(oto_src, out_dir / "oto.ini")
             for pattern in ("character.txt", "character.yaml", "character.yml"):
                 src_file = src_vb / pattern
                 if src_file.exists():
