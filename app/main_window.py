@@ -385,7 +385,7 @@ TRANSLATIONS = {
         "bgm_mode": "Mode",
         "bgm_replace": "Replace BGM",
         "bgm_add": "Add overlay",
-        "bgm_duration": "Duration (sec)",
+        "bgm_metronome": "Metronome",
         "import_reclist_title": "Import Reclist",
         "import_reclist_question": "Replace current reclist or add new entries?",
         "add_entry": "Add Entry",
@@ -506,7 +506,7 @@ TRANSLATIONS = {
         "bgm_mode": "Режим",
         "bgm_replace": "Заменить BGM",
         "bgm_add": "Добавить поверх",
-        "bgm_duration": "Длительность (сек)",
+        "bgm_metronome": "Метроном",
         "import_reclist_title": "Импорт реклиста",
         "import_reclist_question": "Заменить текущий реклист или добавить новые?",
         "add_entry": "Добавить",
@@ -627,7 +627,7 @@ TRANSLATIONS = {
         "bgm_mode": "モード",
         "bgm_replace": "BGMを置換",
         "bgm_add": "上に追加",
-        "bgm_duration": "長さ (秒)",
+        "bgm_metronome": "メトロノーム",
         "import_reclist_title": "レコリストをインポート",
         "import_reclist_question": "既存を置換しますか？それとも追加しますか？",
         "add_entry": "追加",
@@ -1227,7 +1227,11 @@ class BgmNoteDialog(QtWidgets.QDialog):
         self.timing_combo = QtWidgets.QComboBox()
         self.timing_combo.addItems([tr(self.lang, "bgm_timing"), tr(self.lang, "bgm_duration")])
         self.mode_combo = QtWidgets.QComboBox()
-        self.mode_combo.addItems([tr(self.lang, "bgm_replace"), tr(self.lang, "bgm_add")])
+        self.mode_combo.addItems([
+            tr(self.lang, "bgm_replace"),
+            tr(self.lang, "bgm_add"),
+            tr(self.lang, "bgm_metronome"),
+        ])
         self.bpm_spin = QtWidgets.QSpinBox()
         self.bpm_spin.setRange(40, 240)
         self.bpm_spin.setValue(60)
@@ -1257,28 +1261,45 @@ class BgmNoteDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.timing_combo.currentIndexChanged.connect(self._update_visibility)
+        self.mode_combo.currentIndexChanged.connect(self._update_visibility)
         self._update_visibility()
 
     def _update_visibility(self) -> None:
         timing = self.timing_combo.currentText()
         is_timing = timing == tr(self.lang, "bgm_timing")
+        is_metronome = self.mode_combo.currentText() == tr(self.lang, "bgm_metronome")
         self.duration_label.setVisible(not is_timing)
         self.duration_spin.setVisible(not is_timing)
         self.bpm_label.setVisible(is_timing)
         self.bpm_spin.setVisible(is_timing)
         self.mora_label.setVisible(is_timing)
         self.mora_spin.setVisible(is_timing)
+        self.note_label.setVisible(not is_metronome)
+        self.note_edit.setVisible(not is_metronome)
+        if is_metronome:
+            self.timing_combo.setVisible(False)
+            self.timing_label.setVisible(False)
+            self.duration_label.setVisible(True)
+            self.duration_spin.setVisible(True)
+            self.bpm_label.setVisible(True)
+            self.bpm_spin.setVisible(True)
+            self.mora_label.setVisible(False)
+            self.mora_spin.setVisible(False)
+        else:
+            self.timing_combo.setVisible(True)
+            self.timing_label.setVisible(True)
 
     def get_data(self) -> Optional[tuple[str, float, str, int, int, str]]:
         if self.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return None
+        mode = self.mode_combo.currentText()
         note = self.note_edit.text().strip()
-        if not note:
+        if mode != tr(self.lang, "bgm_metronome") and not note:
             return None
         return (
             note,
             float(self.duration_spin.value()),
-            self.mode_combo.currentText(),
+            mode,
             int(self.bpm_spin.value()),
             int(self.mora_spin.value()),
             self.timing_combo.currentText(),
@@ -2018,6 +2039,22 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._start_note_analysis()
                 return
 
+            if mode_text == tr(self.ui_language, "bgm_metronome"):
+                self.audio.generate_metronome(float(bpm), float(dur))
+                if self.session:
+                    self.session.bgm_note = None
+                    self.session.bgm_wav_path = None
+                    self.session.bgm_overlay_enabled = False
+                    self.session.bgm_overlay_note = None
+                    self.session.bgm_overlay_duration = None
+                    self.session.bgm_override = True
+                    self._save_session()
+                    self._log_event("bgm_metronome", str(bpm))
+                    self._save_generated_bgm("metronome", dur)
+                    self._refresh_table()
+                    self._start_note_analysis()
+                return
+
             if timing_mode == tr(self.ui_language, "bgm_timing") and not (self.session and self.session.voicebank_use_bgm):
                 gap = min(0.06, 0.35 * (60.0 / bpm))
                 self.audio.generate_bgm_mora(
@@ -2373,7 +2410,8 @@ class MainWindow(QtWidgets.QMainWindow):
             audio = self.audio.get_bgm_data()
             if audio is None or audio.size == 0:
                 return
-            name = f"bgm_{note}.wav"
+            safe_note = note.replace(" ", "_")
+            name = f"bgm_{safe_note}.wav"
             out_path = self.session.session_dir() / "BGM" / name
             out_path.parent.mkdir(parents=True, exist_ok=True)
             sf.write(str(out_path), audio, self.audio.sample_rate)

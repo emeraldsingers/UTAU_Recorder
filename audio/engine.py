@@ -146,6 +146,48 @@ class AudioEngine(QtCore.QObject):
         self._bgm_pos = 0
         self.status.emit(f"BGM generated (mora): {note}")
 
+    def generate_metronome(
+        self,
+        bpm: float,
+        duration_sec: float,
+        click_hz: float = 2000.0,
+        click_len_ms: float = 20.0,
+        accent_every: int = 4,
+    ) -> None:
+        if bpm <= 0 or duration_sec <= 0:
+            raise ValueError("Invalid BPM or duration")
+        beat_sec = 60.0 / bpm
+        total_samples = int(self.sample_rate * duration_sec)
+        audio = np.zeros(total_samples, dtype=np.float32)
+
+        click_len = max(1, int(self.sample_rate * (click_len_ms / 1000.0)))
+        t = np.linspace(0, click_len / self.sample_rate, click_len, endpoint=False)
+        base_click = np.sin(2 * np.pi * click_hz * t).astype(np.float32)
+        env = np.minimum(1.0, t / 0.002) * np.minimum(1.0, (t[-1] - t) / 0.005 if t[-1] > 0 else 1.0)
+        env = np.clip(env, 0.0, 1.0).astype(np.float32)
+        base_click *= env
+
+        beat = 0
+        pos = 0.0
+        while True:
+            start = int(pos * self.sample_rate)
+            if start >= total_samples:
+                break
+            end = min(total_samples, start + click_len)
+            click = base_click[: end - start].copy()
+            if accent_every > 0 and beat % accent_every == 0:
+                click *= 1.5
+            audio[start:end] += click
+            beat += 1
+            pos += beat_sec
+
+        audio = np.clip(audio, -1.0, 1.0)
+        self._bgm_data = audio
+        self._bgm_playlist = [audio]
+        self._bgm_index = 0
+        self._bgm_pos = 0
+        self.status.emit("BGM generated (metronome)")
+
     def _tone(self, note: str, duration_sec: float) -> np.ndarray:
         freq = note_to_freq(note)
         if not freq:
