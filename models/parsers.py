@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 from pathlib import Path
 
 
-def parse_reclist_line(line: str) -> Optional[Tuple[str, Optional[str]]]:
+def parse_reclist_line(line: str) -> Optional[Tuple[str, Optional[str], Optional[str]]]:
     raw = line.strip()
     if not raw:
         return None
@@ -12,22 +12,31 @@ def parse_reclist_line(line: str) -> Optional[Tuple[str, Optional[str]]]:
         return None
 
     if "\t" in raw:
-        parts = [p.strip() for p in raw.split("\t") if p.strip()]
+        parts = [p.strip() for p in raw.split("\t")]
+        parts = [p for p in parts if p != ""]
+        mode = "tab"
     elif "," in raw:
         parts = [p.strip() for p in raw.split(",") if p.strip()]
+        mode = "comma"
     else:
         parts = [raw]
+        mode = "single"
 
     if not parts:
         return None
 
     alias = parts[0]
-    note = parts[1] if len(parts) > 1 else None
-    return alias, note
+    note: Optional[str] = None
+    comment: Optional[str] = None
+    if mode == "tab":
+        comment = parts[1] if len(parts) > 1 else None
+    elif mode == "comma":
+        comment = parts[1] if len(parts) > 1 else None
+    return alias, note, comment
 
 
-def parse_reclist_text(text: str) -> List[Tuple[str, Optional[str]]]:
-    items: List[Tuple[str, Optional[str]]] = []
+def parse_reclist_text(text: str) -> List[Tuple[str, Optional[str], Optional[str]]]:
+    items: List[Tuple[str, Optional[str], Optional[str]]] = []
     for line in text.splitlines():
         parsed = parse_reclist_line(line)
         if parsed:

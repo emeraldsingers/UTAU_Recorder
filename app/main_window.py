@@ -318,6 +318,7 @@ TRANSLATIONS = {
         "back_exit": "Back / Exit",
         "save_reclist_to": "Save Reclist To",
         "import_reclist": "Import Reclist",
+        "import_oremo_comment": "Import OREMO Comment",
         "import_voicebank": "Import Voicebank",
         "import_bgm": "Import BGM WAV",
         "generate_bgm": "Generate BGM Note",
@@ -415,6 +416,7 @@ TRANSLATIONS = {
         "table_alias": "Alias",
         "table_romaji": "Romaji",
         "table_note": "Note",
+        "table_comment": "Comment",
         "table_duration": "Duration",
         "table_file": "File",
         "recompute_note": "Recompute Note",
@@ -449,6 +451,8 @@ TRANSLATIONS = {
         "bgm_metronome": "Metronome",
         "import_reclist_title": "Import Reclist",
         "import_reclist_question": "Replace current reclist or add new entries?",
+        "import_oremo_title": "Import OREMO Comment",
+        "import_oremo_question": "Replace current reclist or add/update comments?",
         "add_entry": "Add Entry",
         "delete_entry": "Delete Entry",
         "delete_selected_title": "Delete recordings",
@@ -527,6 +531,7 @@ TRANSLATIONS = {
         "back_exit": "Назад / Выход",
         "save_reclist_to": "Сохранить реклист как",
         "import_reclist": "Импорт реклиста",
+        "import_oremo_comment": "Импорт OREMO Comment",
         "import_voicebank": "Импорт войсбанка",
         "import_bgm": "Импорт BGM WAV",
         "generate_bgm": "Сгенерировать BGM ноту",
@@ -576,6 +581,7 @@ TRANSLATIONS = {
         "table_alias": "Алиас",
         "table_romaji": "Ромадзи",
         "table_note": "Нота",
+        "table_comment": "Комментарий",
         "table_duration": "Длительность",
         "table_file": "Файл",
         "recompute_note": "Пересчитать ноту",
@@ -610,6 +616,8 @@ TRANSLATIONS = {
         "bgm_metronome": "Метроном",
         "import_reclist_title": "Импорт реклиста",
         "import_reclist_question": "Заменить текущий реклист или добавить новые?",
+        "import_oremo_title": "Импорт OREMO Comment",
+        "import_oremo_question": "Заменить текущий реклист или добавить/обновить комментарии?",
         "add_entry": "Добавить",
         "delete_entry": "Удалить",
         "delete_selected_title": "Удалить записи",
@@ -688,6 +696,7 @@ TRANSLATIONS = {
         "back_exit": "戻る / 終了",
         "save_reclist_to": "レコリストを書き出し",
         "import_reclist": "レコリストをインポート",
+        "import_oremo_comment": "OREMOコメントをインポート",
         "import_voicebank": "音源をインポート",
         "import_bgm": "BGM WAVをインポート",
         "generate_bgm": "BGMノート生成",
@@ -737,6 +746,7 @@ TRANSLATIONS = {
         "table_alias": "エイリアス",
         "table_romaji": "ローマ字",
         "table_note": "ノート",
+        "table_comment": "コメント",
         "table_duration": "長さ",
         "table_file": "ファイル",
         "recompute_note": "ノートを再計算",
@@ -771,6 +781,8 @@ TRANSLATIONS = {
         "bgm_metronome": "メトロノーム",
         "import_reclist_title": "レコリストをインポート",
         "import_reclist_question": "既存を置換しますか？それとも追加しますか？",
+        "import_oremo_title": "OREMOコメントをインポート",
+        "import_oremo_question": "既存を置換しますか？それともコメントを追加・更新しますか？",
         "add_entry": "追加",
         "delete_entry": "削除",
         "delete_selected_title": "録音を削除",
@@ -1772,16 +1784,18 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         main_layout.addWidget(splitter, 1)
 
-        self.table = QtWidgets.QTableWidget(0, 6)
+        self.table = QtWidgets.QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels([
             tr(self.ui_language, "table_status"),
             tr(self.ui_language, "table_alias"),
             tr(self.ui_language, "table_romaji"),
             tr(self.ui_language, "table_note"),
+            tr(self.ui_language, "table_comment"),
             tr(self.ui_language, "table_duration"),
             tr(self.ui_language, "table_file"),
         ])
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionsMovable(True)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1952,6 +1966,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.import_menu = menu.addMenu(tr(self.ui_language, "import"))
         self.import_reclist_action = self.import_menu.addAction(tr(self.ui_language, "import_reclist"))
+        self.import_oremo_action = self.import_menu.addAction(tr(self.ui_language, "import_oremo_comment"))
         self.import_voicebank_action = self.import_menu.addAction(tr(self.ui_language, "import_voicebank"))
         self.import_bgm_action = self.import_menu.addAction(tr(self.ui_language, "import_bgm"))
         self.generate_bgm_action = self.import_menu.addAction(tr(self.ui_language, "generate_bgm"))
@@ -1994,6 +2009,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.back_action.triggered.connect(self._back_or_exit)
 
         self.import_reclist_action.triggered.connect(self._import_reclist)
+        self.import_oremo_action.triggered.connect(self._import_oremo_comment)
         self.import_voicebank_action.triggered.connect(self._import_voicebank)
         self.import_bgm_action.triggered.connect(self._import_bgm)
         self.generate_bgm_action.triggered.connect(self._generate_bgm)
@@ -2141,15 +2157,69 @@ class MainWindow(QtWidgets.QMainWindow):
             parsed = [entry for entry in parse_reclist_text(text) if entry[0] not in existing]
             if parsed and not replace_all:
                 self._push_undo_state()
-            for alias, note in parsed:
+            for alias, note, comment in parsed:
                 romaji = "_".join(kana_to_romaji_tokens(alias)) if needs_romaji(alias) else None
-                self.session.add_item(alias, note, romaji=romaji)
+                item = self.session.add_item(alias, note, romaji=romaji)
+                if comment:
+                    item.notes = comment
             self._save_reclist_copy(text)
             self._log_event("import_reclist", Path(path).name)
             self._refresh_table()
             self._save_session()
         except Exception as exc:
             logger.exception("Failed to import reclist")
+            self._show_error(str(exc))
+
+    def _import_oremo_comment(self) -> None:
+        if not self.session:
+            self._create_temp_session()
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import OREMO Comment", "", "Text Files (*.txt)")
+        if not path:
+            return
+        try:
+            text = read_text_guess(Path(path))
+            choice = QtWidgets.QMessageBox.question(
+                self,
+                tr(self.ui_language, "import_oremo_title"),
+                tr(self.ui_language, "import_oremo_question"),
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            replace_all = choice == QtWidgets.QMessageBox.StandardButton.Yes
+            if replace_all:
+                self._push_undo_state()
+                self.session.items.clear()
+            existing = {item.alias: item for item in self.session.items}
+            added = False
+            for line in text.splitlines():
+                raw = line.strip()
+                if not raw or raw.startswith("#") or raw.startswith(";"):
+                    continue
+                if "/t" in raw:
+                    alias, comment = raw.split("/t", 1)
+                else:
+                    alias, comment = raw, ""
+                alias = alias.strip()
+                comment = comment.strip()
+                if not alias:
+                    continue
+                if alias in existing:
+                    if comment:
+                        existing[alias].notes = comment
+                else:
+                    romaji = "_".join(kana_to_romaji_tokens(alias)) if needs_romaji(alias) else None
+                    item = self.session.add_item(alias, None, romaji=romaji)
+                    if comment:
+                        item.notes = comment
+                    added = True
+            if added and not replace_all:
+                self._push_undo_state()
+            self._save_reclist_copy(text)
+            self._log_event("import_oremo_comment", Path(path).name)
+            self._refresh_table()
+            self._save_session()
+        except Exception as exc:
+            logger.exception("Failed to import OREMO comment")
             self._show_error(str(exc))
 
     def _import_voicebank(self) -> None:
@@ -2316,7 +2386,9 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             lines = []
             for item in self.session.items:
-                if item.note:
+                if item.notes:
+                    lines.append(f"{item.alias}\\t{item.notes}")
+                elif item.note:
                     lines.append(f"{item.alias}\\t{item.note}")
                 else:
                     lines.append(item.alias)
@@ -3009,6 +3081,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "back_action"):
             self.back_action.setText(tr(self.ui_language, "back_exit"))
         self.import_reclist_action.setText(tr(self.ui_language, "import_reclist"))
+        self.import_oremo_action.setText(tr(self.ui_language, "import_oremo_comment"))
         self.import_voicebank_action.setText(tr(self.ui_language, "import_voicebank"))
         self.import_bgm_action.setText(tr(self.ui_language, "import_bgm"))
         self.generate_bgm_action.setText(tr(self.ui_language, "generate_bgm"))
@@ -3052,6 +3125,7 @@ class MainWindow(QtWidgets.QMainWindow):
             tr(self.ui_language, "table_alias"),
             tr(self.ui_language, "table_romaji"),
             tr(self.ui_language, "table_note"),
+            tr(self.ui_language, "table_comment"),
             tr(self.ui_language, "table_duration"),
             tr(self.ui_language, "table_file"),
         ])
@@ -3274,20 +3348,23 @@ class MainWindow(QtWidgets.QMainWindow):
             note_item = NoteTableItem(note_text, self._note_sort_priority(note_text))
             note_item.setData(QtCore.Qt.ItemDataRole.UserRole, row)
             self.table.setItem(row, 3, note_item)
+            comment_item = QtWidgets.QTableWidgetItem(item.notes or "")
+            comment_item.setData(QtCore.Qt.ItemDataRole.UserRole, row)
+            self.table.setItem(row, 4, comment_item)
             duration = f"{item.duration_sec:.2f}" if item.duration_sec else ""
             duration_item = QtWidgets.QTableWidgetItem(duration)
             duration_item.setData(QtCore.Qt.ItemDataRole.UserRole, row)
-            self.table.setItem(row, 4, duration_item)
+            self.table.setItem(row, 5, duration_item)
 
             file_item = QtWidgets.QTableWidgetItem(item.wav_path or "")
             file_item.setData(QtCore.Qt.ItemDataRole.UserRole, row)
-            self.table.setItem(row, 5, file_item)
-            for col in range(6):
+            self.table.setItem(row, 6, file_item)
+            for col in range(7):
                 item_widget = self.table.item(row, col)
                 if item_widget is None:
                     continue
                 flags = item_widget.flags()
-                if col == 1:
+                if col in (1, 4):
                     item_widget.setFlags(flags | QtCore.Qt.ItemFlag.ItemIsEditable)
                 else:
                     item_widget.setFlags(flags & ~QtCore.Qt.ItemFlag.ItemIsEditable)
@@ -4323,21 +4400,24 @@ class MainWindow(QtWidgets.QMainWindow):
         col = item.column()
         if row < 0 or row >= len(self.session.items):
             return
-        if col != 1:
-            return
-        new_alias = item.text().strip()
-        if not new_alias:
-            return
         current = self.session.items[row]
-        if any(it.alias == new_alias for i, it in enumerate(self.session.items) if i != row):
-            self._show_error("Alias already exists")
+        if col == 1:
+            new_alias = item.text().strip()
+            if not new_alias:
+                return
+            if any(it.alias == new_alias for i, it in enumerate(self.session.items) if i != row):
+                self._show_error("Alias already exists")
+                self._refresh_table()
+                return
+            self._push_undo_state()
+            current.alias = new_alias
+            current.romaji = "_".join(kana_to_romaji_tokens(new_alias)) if needs_romaji(new_alias) else None
             self._refresh_table()
-            return
-        self._push_undo_state()
-        current.alias = new_alias
-        current.romaji = "_".join(kana_to_romaji_tokens(new_alias)) if needs_romaji(new_alias) else None
-        self._refresh_table()
-        self._save_session()
+            self._save_session()
+        elif col == 4:
+            self._push_undo_state()
+            current.notes = item.text()
+            self._save_session()
 
     def _push_undo_state(self) -> None:
         if not self.session:
