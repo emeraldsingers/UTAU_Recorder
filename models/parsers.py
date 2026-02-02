@@ -36,10 +36,36 @@ def parse_reclist_text(text: str) -> List[Tuple[str, Optional[str]]]:
 
 
 def read_text_guess(path: Path) -> str:
-    encodings = ["utf-8-sig", "utf-8", "cp932", "shift_jis"]
+    raw = path.read_bytes()
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    if raw.startswith(b"\xef\xbb\xbf"):
+        try:
+            return raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            pass
+
+    encodings = [
+        "utf-8",
+        "utf-8-sig",
+        "utf-16",
+        "utf-16-le",
+        "utf-16-be",
+        "cp932",
+        "shift_jis",
+        "euc_jp",
+        "gbk",
+        "cp936",
+        "big5",
+        "cp950",
+        "euc_kr",
+    ]
     for enc in encodings:
         try:
-            return path.read_text(encoding=enc)
+            return raw.decode(enc)
         except UnicodeDecodeError:
             continue
-    return path.read_text(encoding="utf-8", errors="ignore")
+    return raw.decode("utf-8", errors="ignore")
