@@ -44,12 +44,13 @@ from models.session import Session, Item, ItemStatus
 from models.voicebank import import_voicebank, parse_oto_ini
 from storage.session_io import save_session, load_session, export_recordings_json
 from app.vst_batch import VstBatchDialog
+from app.voicebank_config_dialog import VoicebankConfigDialog
 
 
 logger = logging.getLogger(__name__)
 
 APP_NAME = "AsoCorder"
-APP_VERSION = "0.4"
+APP_VERSION = "0.4.1"
 GITHUB_OWNER = "emeraldsingers"
 GITHUB_REPO = "UTAU_Recorder"
 GITHUB_PROFILE_URL = "https://github.com/emeraldsingers"
@@ -289,8 +290,31 @@ TRANSLATIONS = {
         "export_recordings": "Export Recordings JSON",
         "open_folder": "Open Session Folder",
         "export_voicebank": "Export Voicebank",
+        "edit_voicebank": "Edit Voicebank",
         "export_voicebank_title": "Export Voicebank",
         "export_voicebank_done": "Voicebank exported.",
+        "voicebank_edit_title": "Edit Voicebank",
+        "voicebank_name": "Name",
+        "voicebank_author": "Author",
+        "voicebank_voice": "Voice",
+        "voicebank_web": "Web",
+        "voicebank_version": "Version",
+        "voicebank_image": "Image",
+        "voicebank_sample": "Sample",
+        "voicebank_portrait": "Portrait",
+        "voicebank_portrait_opacity": "Portrait opacity",
+        "voicebank_portrait_height": "Portrait height",
+        "voicebank_text_encoding": "Text encoding",
+        "voicebank_txt_export": "TXT export",
+        "voicebank_singer_type": "Singer type",
+        "voicebank_phonemizer": "Default phonemizer",
+        "voicebank_use_filename": "Use filename as alias",
+        "voicebank_other_info": "Other info",
+        "voicebank_localized_names": "Localized names",
+        "voicebank_add": "Add",
+        "voicebank_remove": "Remove",
+        "voicebank_pick_image": "Select image",
+        "voicebank_pick_sample": "Select sample",
         "back_exit": "Back / Exit",
         "save_reclist_to": "Save Reclist To",
         "import_reclist": "Import Reclist",
@@ -473,8 +497,31 @@ TRANSLATIONS = {
         "export_recordings": "Экспорт записей JSON",
         "open_folder": "Открыть папку сессии",
         "export_voicebank": "Экспорт войсбанка",
+        "edit_voicebank": "Редактировать войсбанк",
         "export_voicebank_title": "Экспорт войсбанка",
         "export_voicebank_done": "Войсбанк экспортирован.",
+        "voicebank_edit_title": "Редактировать войсбанк",
+        "voicebank_name": "Имя",
+        "voicebank_author": "Автор",
+        "voicebank_voice": "Голос",
+        "voicebank_web": "Сайт",
+        "voicebank_version": "Версия",
+        "voicebank_image": "Изображение",
+        "voicebank_sample": "Семпл",
+        "voicebank_portrait": "Портрет",
+        "voicebank_portrait_opacity": "Прозрачность портрета",
+        "voicebank_portrait_height": "Высота портрета",
+        "voicebank_text_encoding": "Кодировка текста",
+        "voicebank_txt_export": "Экспорт TXT",
+        "voicebank_singer_type": "Тип войсбанка",
+        "voicebank_phonemizer": "Фонемайзер по умолчанию",
+        "voicebank_use_filename": "Использовать имя файла как алиас",
+        "voicebank_other_info": "Прочее",
+        "voicebank_localized_names": "Локализованные имена",
+        "voicebank_add": "Добавить",
+        "voicebank_remove": "Удалить",
+        "voicebank_pick_image": "Выбрать изображение",
+        "voicebank_pick_sample": "Выбрать семпл",
         "back_exit": "Назад / Выход",
         "save_reclist_to": "Сохранить реклист как",
         "import_reclist": "Импорт реклиста",
@@ -609,8 +656,31 @@ TRANSLATIONS = {
         "export_recordings": "録音一覧JSONを書き出し",
         "open_folder": "セッションフォルダを開く",
         "export_voicebank": "音源を書き出す",
+        "edit_voicebank": "音源を編集",
         "export_voicebank_title": "音源を書き出す",
         "export_voicebank_done": "音源を書き出しました。",
+        "voicebank_edit_title": "音源を編集",
+        "voicebank_name": "名前",
+        "voicebank_author": "作者",
+        "voicebank_voice": "声",
+        "voicebank_web": "ウェブ",
+        "voicebank_version": "バージョン",
+        "voicebank_image": "画像",
+        "voicebank_sample": "サンプル",
+        "voicebank_portrait": "ポートレート",
+        "voicebank_portrait_opacity": "ポートレート透明度",
+        "voicebank_portrait_height": "ポートレート高さ",
+        "voicebank_text_encoding": "テキストエンコード",
+        "voicebank_txt_export": "TXTエクスポート",
+        "voicebank_singer_type": "音源タイプ",
+        "voicebank_phonemizer": "デフォルト音素化",
+        "voicebank_use_filename": "ファイル名をエイリアスに使う",
+        "voicebank_other_info": "その他",
+        "voicebank_localized_names": "ローカライズ名",
+        "voicebank_add": "追加",
+        "voicebank_remove": "削除",
+        "voicebank_pick_image": "画像を選択",
+        "voicebank_pick_sample": "サンプルを選択",
         "back_exit": "戻る / 終了",
         "save_reclist_to": "レコリストを書き出し",
         "import_reclist": "レコリストをインポート",
@@ -1847,12 +1917,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.new_action = self.file_menu.addAction(tr(self.ui_language, "new_session"))
         self.open_action = self.file_menu.addAction(tr(self.ui_language, "open_session"))
-        self.open_folder_action = self.file_menu.addAction(tr(self.ui_language, "open_folder"))
         self.save_action = self.file_menu.addAction(tr(self.ui_language, "save_session"))
-        self.save_as_action = self.file_menu.addAction(tr(self.ui_language, "save_as"))
-        self.export_action = self.file_menu.addAction(tr(self.ui_language, "export_recordings"))
-        self.export_voicebank_action = self.file_menu.addAction(tr(self.ui_language, "export_voicebank"))
+        self.save_as_action = QtGui.QAction(tr(self.ui_language, "save_as"), self)
         self.save_reclist_action = self.file_menu.addAction(tr(self.ui_language, "save_reclist_to"))
+        self.file_menu.addSeparator()
+
+        self.edit_voicebank_action = self.file_menu.addAction(tr(self.ui_language, "edit_voicebank"))
+        self.export_voicebank_action = self.file_menu.addAction(tr(self.ui_language, "export_voicebank"))
+        self.export_action = self.file_menu.addAction(tr(self.ui_language, "export_recordings"))
+        self.open_folder_action = self.file_menu.addAction(tr(self.ui_language, "open_folder"))
         self.file_menu.addSeparator()
         self.recent_menu = self.file_menu.addMenu(tr(self.ui_language, "recent_sessions"))
         self._rebuild_recent_menu()
@@ -1898,6 +1971,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_as_action.triggered.connect(self._save_as_session)
         self.export_action.triggered.connect(self._export_recordings)
         self.export_voicebank_action.triggered.connect(self._export_voicebank)
+        self.edit_voicebank_action.triggered.connect(self._edit_voicebank)
         self.save_reclist_action.triggered.connect(self._save_reclist_as)
         self.back_action.triggered.connect(self._back_or_exit)
 
@@ -2553,16 +2627,6 @@ class MainWindow(QtWidgets.QMainWindow):
         out_dir = Path(base) / folder_name
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # character.txt (minimal)
-        char_path = out_dir / "character.txt"
-        char_path.write_text(
-            f"name={self.session.singer}\n"
-            f"author={self.session.singer}\n"
-            f"comment={self.session.name}\n",
-            encoding="utf-8",
-        )
-
-        # copy recordings
         for item in self.session.items:
             if not item.wav_path:
                 continue
@@ -2573,11 +2637,50 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             shutil.copy2(src, out_dir / src.name)
 
+        src_vb = self.session.session_dir()
+        if src_vb and src_vb.exists():
+            for pattern in ("character.txt", "character.yaml", "character.yml"):
+                src_file = src_vb / pattern
+                if src_file.exists():
+                    shutil.copy2(src_file, out_dir / src_file.name)
+            for ext in ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif", "*.webp"):
+                for img in src_vb.glob(ext):
+                    shutil.copy2(img, out_dir / img.name)
+        else:
+            # character.txt (minimal)
+            char_path = out_dir / "character.txt"
+            char_path.write_text(
+                f"name={self.session.singer}\n"
+                f"author={self.session.singer}\n"
+                f"comment={self.session.name}\n",
+                encoding="utf-8",
+            )
+
         QtWidgets.QMessageBox.information(
             self,
             tr(self.ui_language, "export_voicebank_title"),
             tr(self.ui_language, "export_voicebank_done"),
         )
+
+    def _edit_voicebank(self) -> None:
+        if not self.session:
+            return
+        folder = None
+        if self.session.voicebank_paths:
+            folder = Path(self.session.voicebank_paths[0])
+        elif self.session.voicebank_path:
+            folder = Path(self.session.voicebank_path)
+        if not folder or not folder.exists():
+            folder_str = QtWidgets.QFileDialog.getExistingDirectory(
+                self,
+                tr(self.ui_language, "edit_voicebank"),
+                str(self.session.session_dir()),
+            )
+            if not folder_str:
+                return
+            folder = Path(folder_str)
+        dialog = VoicebankConfigDialog(folder, lambda k: tr(self.ui_language, k), self.ui_language, self)
+        dialog.exec()
 
     def _maybe_show_start_dialog(self) -> None:
         recent_entries = []
@@ -2745,6 +2848,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.export_action.setText(tr(self.ui_language, "export_recordings"))
         self.open_folder_action.setText(tr(self.ui_language, "open_folder"))
         self.export_voicebank_action.setText(tr(self.ui_language, "export_voicebank"))
+        self.edit_voicebank_action.setText(tr(self.ui_language, "edit_voicebank"))
         self.save_reclist_action.setText(tr(self.ui_language, "save_reclist_to"))
         self.recent_menu.setTitle(tr(self.ui_language, "recent_sessions"))
         if hasattr(self, "back_action"):
