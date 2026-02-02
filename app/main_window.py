@@ -2665,11 +2665,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _edit_voicebank(self) -> None:
         if not self.session:
             return
-        folder = None
-        if self.session.voicebank_paths:
-            folder = Path(self.session.voicebank_paths[0])
-        elif self.session.voicebank_path:
-            folder = Path(self.session.voicebank_path)
+        folder = self.session.session_dir()
         if not folder or not folder.exists():
             folder_str = QtWidgets.QFileDialog.getExistingDirectory(
                 self,
