@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 import urllib.request
 import urllib.error
+import zipfile
 
 import numpy as np
 import soundfile as sf
@@ -56,6 +57,25 @@ GITHUB_RELEASES_URL = "https://github.com/emeraldsingers/UTAU_Recorder/releases"
 GITHUB_URL = "https://github.com/emeraldsingers/UTAU_Recorder"
 YOUTUBE_URL = "https://www.youtube.com/@asoqwer"
 
+
+def _parse_version(value: str) -> tuple[int, ...]:
+    cleaned = value.strip().lstrip("vV")
+    parts: list[int] = []
+    for piece in cleaned.split("."):
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            break
+    return tuple(parts) if parts else (0,)
+
+
+def _is_version_newer(candidate: str, current: str) -> bool:
+    cand = _parse_version(candidate)
+    cur = _parse_version(current)
+    length = max(len(cand), len(cur))
+    cand += (0,) * (length - len(cand))
+    cur += (0,) * (length - len(cur))
+    return cand > cur
 
 def _analysis_cache_key(path: Path) -> str:
     return hashlib.sha1(str(path).encode("utf-8", errors="ignore")).hexdigest()
@@ -234,17 +254,27 @@ TRANSLATIONS = {
         "vst_tools": "VST Tools",
         "help": "Help",
         "about": "About",
+        "check_updates": "Check for updates...",
         "about_title": "About AsoCorder",
         "about_version": "Version",
         "about_github": "Authors GitHub",
         "about_youtube": "Authors YouTube",
         "about_releases": "Releases",
         "about_check_updates": "Check for updates",
+        "about_download_update": "Download update",
         "about_checking": "Checking for updates...",
         "about_latest": "Latest",
         "about_up_to_date": "Up to date",
         "about_update_available": "Update available",
         "about_update_failed": "Update check failed",
+        "about_current_newer": "Current version is newer than latest release.",
+        "about_ignore_until_next": "Don't bother until next update",
+        "about_no_assets": "No release archives found.",
+        "about_download_done": "Update downloaded.",
+        "about_download_failed": "Download failed.",
+        "about_extracting": "Extracting update...",
+        "about_extract_failed": "Failed to extract update.",
+        "about_restart_required": "Restart the app to apply the update.",
         "session_settings": "Session Settings",
         "session_settings_title": "Edit Session Settings",
         "session_settings_note": "Changes apply to future recordings.",
@@ -407,17 +437,27 @@ TRANSLATIONS = {
         "settings": "Настройки",
         "help": "Справка",
         "about": "О программе",
+        "check_updates": "Проверить обновления...",
         "about_title": "О программе AsoCorder",
         "about_version": "Версия",
         "about_github": "GitHub автора",
         "about_youtube": "YouTube автора",
         "about_releases": "Релизы",
         "about_check_updates": "Проверить обновления",
+        "about_download_update": "Скачать обновление",
         "about_checking": "Проверяю обновления...",
         "about_latest": "Последняя",
         "about_up_to_date": "Актуальная версия",
         "about_update_available": "Доступна новая версия",
         "about_update_failed": "Не удалось проверить обновления",
+        "about_current_newer": "Текущая версия новее, чем в релизах.",
+        "about_ignore_until_next": "Не беспокоить до следующего обновления",
+        "about_no_assets": "Архивы релиза не найдены.",
+        "about_download_done": "Обновление скачано.",
+        "about_download_failed": "Не удалось скачать обновление.",
+        "about_extracting": "Распаковка обновления...",
+        "about_extract_failed": "Не удалось распаковать обновление.",
+        "about_restart_required": "Перезапусти приложение для применения обновления.",
         "session_settings": "Настройки сессии",
         "session_settings_title": "Изменить настройки сессии",
         "session_settings_note": "Изменения применяются к будущим записям.",
@@ -533,17 +573,27 @@ TRANSLATIONS = {
         "settings": "設定",
         "help": "ヘルプ",
         "about": "このソフトについて",
+        "check_updates": "更新を確認...",
         "about_title": "AsoCorder について",
         "about_version": "バージョン",
         "about_github": "GitHub",
         "about_youtube": "YouTube",
         "about_releases": "リリース",
         "about_check_updates": "更新を確認",
+        "about_download_update": "更新をダウンロード",
         "about_checking": "更新を確認中...",
         "about_latest": "最新",
         "about_up_to_date": "最新です",
         "about_update_available": "更新があります",
         "about_update_failed": "更新確認に失敗しました",
+        "about_current_newer": "現在のバージョンは最新リリースより新しいです。",
+        "about_ignore_until_next": "次の更新まで通知しない",
+        "about_no_assets": "アーカイブが見つかりません。",
+        "about_download_done": "更新をダウンロードしました。",
+        "about_download_failed": "ダウンロードに失敗しました。",
+        "about_extracting": "更新を展開中...",
+        "about_extract_failed": "更新の展開に失敗しました。",
+        "about_restart_required": "更新を適用するには再起動してください。",
         "session_settings": "セッション設定",
         "session_settings_title": "セッション設定を編集",
         "session_settings_note": "変更は今後の録音に適用されます。",
@@ -1141,7 +1191,7 @@ class StartDialog(QtWidgets.QDialog):
 
 
 class UpdateCheckWorker(QtCore.QThread):
-    result = QtCore.pyqtSignal(str, str)
+    result = QtCore.pyqtSignal(str, str, str, str)
 
     def run(self) -> None:
         url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
@@ -1153,9 +1203,45 @@ class UpdateCheckWorker(QtCore.QThread):
             with urllib.request.urlopen(req, timeout=10) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
             tag = str(payload.get("tag_name", "")).strip()
-            self.result.emit(tag, "")
+            assets = payload.get("assets") or []
+            asset_url = ""
+            asset_name = ""
+            for asset in assets:
+                name = str(asset.get("name", ""))
+                url = str(asset.get("browser_download_url", ""))
+                if not name or not url:
+                    continue
+                lower = name.lower()
+                if lower.endswith(".zip") or lower.endswith(".rar"):
+                    asset_name = name
+                    asset_url = url
+                    break
+            self.result.emit(tag, asset_name, asset_url, "")
         except Exception as exc:
-            self.result.emit("", str(exc))
+            self.result.emit("", "", "", str(exc))
+
+
+class UpdateDownloadWorker(QtCore.QThread):
+    finished = QtCore.pyqtSignal(bool, str)
+
+    def __init__(self, url: str, out_path: Path, parent: Optional[QtCore.QObject] = None) -> None:
+        super().__init__(parent)
+        self.url = url
+        self.out_path = out_path
+
+    def run(self) -> None:
+        try:
+            req = urllib.request.Request(
+                self.url,
+                headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = resp.read()
+            self.out_path.parent.mkdir(parents=True, exist_ok=True)
+            self.out_path.write_bytes(data)
+            self.finished.emit(True, str(self.out_path))
+        except Exception as exc:
+            self.finished.emit(False, str(exc))
 
 
 class AboutDialog(QtWidgets.QDialog):
@@ -1165,6 +1251,12 @@ class AboutDialog(QtWidgets.QDialog):
         self.setWindowTitle(tr(self.lang, "about_title"))
         self.setMinimumWidth(420)
         self._worker: Optional[UpdateCheckWorker] = None
+        self._download_worker: Optional[UpdateDownloadWorker] = None
+        self._latest_tag: str = ""
+        self._latest_asset_name: str = ""
+        self._latest_asset_url: str = ""
+        self._manual_update_worker: Optional[UpdateCheckWorker] = None
+        self._last_download_path: Optional[Path] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         title = QtWidgets.QLabel(APP_NAME)
@@ -1183,10 +1275,8 @@ class AboutDialog(QtWidgets.QDialog):
         link_row.addWidget(self.youtube_btn)
         layout.addLayout(link_row)
 
-        self.check_btn = QtWidgets.QPushButton(tr(self.lang, "about_check_updates"))
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setStyleSheet("color: #666666;")
-        layout.addWidget(self.check_btn)
         layout.addWidget(self.status_label)
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
@@ -1197,7 +1287,6 @@ class AboutDialog(QtWidgets.QDialog):
         self.github_btn.clicked.connect(lambda: self._open_url(GITHUB_PROFILE_URL))
         self.releases_btn.clicked.connect(lambda: self._open_url(GITHUB_RELEASES_URL))
         self.youtube_btn.clicked.connect(lambda: self._open_url(YOUTUBE_URL))
-        self.check_btn.clicked.connect(self._check_updates)
 
         if not YOUTUBE_URL:
             self.youtube_btn.setEnabled(False)
@@ -1208,25 +1297,6 @@ class AboutDialog(QtWidgets.QDialog):
             return
         QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
 
-    def _check_updates(self) -> None:
-        if self._worker and self._worker.isRunning():
-            return
-        self.status_label.setText(tr(self.lang, "about_checking"))
-        self.check_btn.setEnabled(False)
-        self._worker = UpdateCheckWorker(self)
-        self._worker.result.connect(self._on_update_result)
-        self._worker.finished.connect(lambda: self.check_btn.setEnabled(True))
-        self._worker.start()
-
-    def _on_update_result(self, tag: str, error: str) -> None:
-        if error or not tag:
-            self.status_label.setText(tr(self.lang, "about_update_failed"))
-            return
-        latest = tag.lstrip("vV")
-        if latest == APP_VERSION:
-            self.status_label.setText(f"{tr(self.lang, 'about_up_to_date')} (v{APP_VERSION})")
-        else:
-            self.status_label.setText(f"{tr(self.lang, 'about_update_available')}: {tag}")
 class BgmNoteDialog(QtWidgets.QDialog):
     def __init__(self, lang: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -1555,6 +1625,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_analysis_key: Optional[tuple] = None
         self._current_analysis_meta: Optional[tuple] = None
         self.note_progress: Optional[QtWidgets.QProgressBar] = None
+        self._update_check_worker: Optional[UpdateCheckWorker] = None
+        self._update_download_worker: Optional[UpdateDownloadWorker] = None
+        self._last_update_tag: str = ""
+        self._last_update_asset_name: str = ""
+        self._last_update_asset_url: str = ""
+        self._manual_update_worker: Optional[UpdateCheckWorker] = None
         self._hold_record_active = False
 
         self.audio = AudioEngine()
@@ -1812,6 +1888,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.help_menu = menu.addMenu(tr(self.ui_language, "help"))
         self.about_action = self.help_menu.addAction(tr(self.ui_language, "about"))
+        self.check_updates_action = self.help_menu.addAction(tr(self.ui_language, "check_updates"))
 
     def _connect_actions(self) -> None:
         self.new_action.triggered.connect(self._new_session)
@@ -1835,6 +1912,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui_settings_action.triggered.connect(self._open_ui_settings)
         self.undo_action.triggered.connect(self._undo)
         self.about_action.triggered.connect(self._open_about)
+        self.check_updates_action.triggered.connect(self._manual_check_updates)
 
         self.table.itemSelectionChanged.connect(self._select_item)
         self.table.itemChanged.connect(self._item_changed)
@@ -2307,6 +2385,132 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog = AboutDialog(self.ui_language, self)
         dialog.exec()
 
+    def _manual_check_updates(self) -> None:
+        if self._manual_update_worker and self._manual_update_worker.isRunning():
+            return
+        self._manual_update_worker = UpdateCheckWorker(self)
+        self._manual_update_worker.result.connect(self._on_manual_update_result)
+        self._manual_update_worker.start()
+
+    def _on_manual_update_result(self, tag: str, asset_name: str, asset_url: str, error: str) -> None:
+        if error or not tag:
+            QtWidgets.QMessageBox.warning(
+                self,
+                tr(self.ui_language, "check_updates"),
+                tr(self.ui_language, "about_update_failed"),
+            )
+            return
+        if _is_version_newer(APP_VERSION, tag):
+            QtWidgets.QMessageBox.information(
+                self,
+                tr(self.ui_language, "check_updates"),
+                tr(self.ui_language, "about_current_newer"),
+            )
+            return
+        if not _is_version_newer(tag, APP_VERSION):
+            QtWidgets.QMessageBox.information(
+                self,
+                tr(self.ui_language, "check_updates"),
+                f"{tr(self.ui_language, 'about_up_to_date')} (v{APP_VERSION})",
+            )
+            return
+        self._last_update_tag = tag
+        self._last_update_asset_name = asset_name
+        self._last_update_asset_url = asset_url
+        msg = f"{tr(self.ui_language, 'about_update_available')}: {tag}"
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(tr(self.ui_language, "check_updates"))
+        box.setText(msg)
+        download_btn = box.addButton(tr(self.ui_language, "about_download_update"), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        if not asset_url:
+            download_btn.setEnabled(False)
+        box.exec()
+        if box.clickedButton() == download_btn:
+            self._download_update(asset_url, asset_name, tag)
+
+    def _init_update_check(self) -> None:
+        QtCore.QTimer.singleShot(800, self._auto_check_updates)
+
+    def _auto_check_updates(self) -> None:
+        if self._update_check_worker and self._update_check_worker.isRunning():
+            return
+        self._update_check_worker = UpdateCheckWorker(self)
+        self._update_check_worker.result.connect(self._on_auto_update_result)
+        self._update_check_worker.start()
+
+    def _on_auto_update_result(self, tag: str, asset_name: str, asset_url: str, error: str) -> None:
+        if error or not tag:
+            return
+        if not _is_version_newer(tag, APP_VERSION):
+            return
+        ignored = str(self.settings.value("update_ignore_tag", ""))
+        if ignored and ignored == tag:
+            return
+        self._last_update_tag = tag
+        self._last_update_asset_name = asset_name
+        self._last_update_asset_url = asset_url
+
+        msg = f"{tr(self.ui_language, 'about_update_available')}: {tag}"
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(tr(self.ui_language, "about_check_updates"))
+        box.setText(msg)
+        download_btn = box.addButton(tr(self.ui_language, "about_download_update"), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        later_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        ignore_btn = box.addButton(tr(self.ui_language, "about_ignore_until_next"), QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        if not asset_url:
+            download_btn.setEnabled(False)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == ignore_btn:
+            self.settings.setValue("update_ignore_tag", tag)
+            return
+        if clicked != download_btn:
+            return
+        self._download_update(asset_url, asset_name, tag)
+
+    def _download_update(self, asset_url: str, asset_name: str, tag: str) -> None:
+        suggested = asset_name or f"{APP_NAME}_{tag}.zip"
+        target, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            tr(self.ui_language, "about_download_update"),
+            suggested,
+            "Archives (*.zip *.rar);;All Files (*)",
+        )
+        if not target:
+            return
+        self._update_download_worker = UpdateDownloadWorker(asset_url, Path(target), self)
+        self._update_download_worker.finished.connect(self._on_auto_download_done)
+        self._update_download_worker.start()
+
+    def _on_auto_download_done(self, ok: bool, info: str) -> None:
+        if not ok:
+            QtWidgets.QMessageBox.warning(
+                self,
+                tr(self.ui_language, "about_download_update"),
+                tr(self.ui_language, "about_download_failed"),
+            )
+            return
+        path = Path(info)
+        if path.suffix.lower() == ".zip":
+            try:
+                extract_dir = path.with_suffix("")
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(path, "r") as zf:
+                    zf.extractall(extract_dir)
+            except Exception:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    tr(self.ui_language, "about_download_update"),
+                    tr(self.ui_language, "about_extract_failed"),
+                )
+                return
+        QtWidgets.QMessageBox.information(
+            self,
+            tr(self.ui_language, "about_download_update"),
+            tr(self.ui_language, "about_restart_required"),
+        )
+
     def _open_vst_tools(self) -> None:
         dialog = VstToolsDialog(self.ui_language, self.settings, self)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
@@ -2396,6 +2600,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "full_path": path,
             })
         dialog = StartDialog(self.ui_language, recent_entries, self)
+        dialog.show()
+        QtCore.QTimer.singleShot(600, self._auto_check_updates)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             if dialog.closed_via_x:
                 self.close()
@@ -2555,6 +2761,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_action.setText(tr(self.ui_language, "undo"))
         if hasattr(self, "about_action"):
             self.about_action.setText(tr(self.ui_language, "about"))
+        if hasattr(self, "check_updates_action"):
+            self.check_updates_action.setText(tr(self.ui_language, "check_updates"))
 
         if self.current_item:
             duration = ""
@@ -3168,8 +3376,6 @@ class MainWindow(QtWidgets.QMainWindow):
         f0 = estimate_f0(buffer, self.audio.sample_rate)
         note, cents = note_from_f0(f0)
         self.note_label.setText(f"{tr(self.ui_language, 'current_note_prefix')}{note} ({cents:+.1f} cents)")
-
-        # Live current note uses estimate_f0 (classic). Charts are handled elsewhere.
 
     def _plot_clicked(self, plot: pg.PlotWidget, event: QtCore.QEvent) -> None:
         if not self.playhead:
