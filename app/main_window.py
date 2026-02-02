@@ -9,6 +9,8 @@ import json
 import multiprocessing as mp
 from pathlib import Path
 from typing import Optional
+import urllib.request
+import urllib.error
 
 import numpy as np
 import soundfile as sf
@@ -44,6 +46,14 @@ from app.vst_batch import VstBatchDialog
 
 
 logger = logging.getLogger(__name__)
+
+APP_NAME = "AsoCorder"
+APP_VERSION = "0.3"
+GITHUB_OWNER = "emeraldsingers"
+GITHUB_REPO = "UTAU_Recorder"
+GITHUB_PROFILE_URL = "https://github.com/emeraldsingers"
+GITHUB_RELEASES_URL = "https://github.com/emeraldsingers/UTAU_Recorder/releases"
+YOUTUBE_URL = "https://www.youtube.com/@asoqwer"
 
 
 def _analysis_cache_key(path: Path) -> str:
@@ -221,6 +231,19 @@ TRANSLATIONS = {
         "edit": "Edit",
         "tools": "Tools",
         "vst_tools": "VST Tools",
+        "help": "Help",
+        "about": "About",
+        "about_title": "About AsoCorder",
+        "about_version": "Version",
+        "about_github": "Authors GitHub",
+        "about_youtube": "Authors YouTube",
+        "about_releases": "Releases",
+        "about_check_updates": "Check for updates",
+        "about_checking": "Checking for updates...",
+        "about_latest": "Latest",
+        "about_up_to_date": "Up to date",
+        "about_update_available": "Update available",
+        "about_update_failed": "Update check failed",
         "session_settings": "Session Settings",
         "session_settings_title": "Edit Session Settings",
         "session_settings_note": "Changes apply to future recordings.",
@@ -245,6 +268,7 @@ TRANSLATIONS = {
         "pitch_algo_classic": "Classic (autocorr)",
         "pitch_algo_yin": "New (YIN)",
         "note_workers": "Note analysis workers",
+        "hold_to_record": "Hold R to record (OREMO style)",
         "theme": "Theme",
         "theme_light": "Light",
         "theme_dark": "Dark",
@@ -365,6 +389,8 @@ TRANSLATIONS = {
         "import_reclist_question": "Replace current reclist or add new entries?",
         "add_entry": "Add Entry",
         "delete_entry": "Delete Entry",
+        "delete_selected_title": "Delete recordings",
+        "delete_selected_prompt": "Delete {count} selected entries and their files?",
         "alias": "Alias",
         "note_optional": "Note (optional)",
     },
@@ -373,6 +399,19 @@ TRANSLATIONS = {
         "file": "Файл",
         "import": "Импорт",
         "settings": "Настройки",
+        "help": "Справка",
+        "about": "О программе",
+        "about_title": "О программе AsoCorder",
+        "about_version": "Версия",
+        "about_github": "GitHub автора",
+        "about_youtube": "YouTube автора",
+        "about_releases": "Релизы",
+        "about_check_updates": "Проверить обновления",
+        "about_checking": "Проверяю обновления...",
+        "about_latest": "Последняя",
+        "about_up_to_date": "Актуальная версия",
+        "about_update_available": "Доступна новая версия",
+        "about_update_failed": "Не удалось проверить обновления",
         "session_settings": "Настройки сессии",
         "session_settings_title": "Изменить настройки сессии",
         "session_settings_note": "Изменения применяются к будущим записям.",
@@ -398,6 +437,7 @@ TRANSLATIONS = {
         "pitch_algo_classic": "Классический (автокорр.)",
         "pitch_algo_yin": "Новый (YIN)",
         "note_workers": "Потоки анализа нот",
+        "hold_to_record": "Запись удержанием R (как в OREMO)",
         "theme": "Тема",
         "theme_light": "Светлая",
         "theme_dark": "Темная",
@@ -470,6 +510,8 @@ TRANSLATIONS = {
         "import_reclist_question": "Заменить текущий реклист или добавить новые?",
         "add_entry": "Добавить",
         "delete_entry": "Удалить",
+        "delete_selected_title": "Удалить записи",
+        "delete_selected_prompt": "Удалить выбранные записи ({count}) и их файлы?",
         "alias": "Алиас",
         "note_optional": "Нота (опц.)",
     },
@@ -478,6 +520,19 @@ TRANSLATIONS = {
         "file": "ファイル",
         "import": "インポート",
         "settings": "設定",
+        "help": "ヘルプ",
+        "about": "このソフトについて",
+        "about_title": "AsoCorder について",
+        "about_version": "バージョン",
+        "about_github": "GitHub",
+        "about_youtube": "YouTube",
+        "about_releases": "リリース",
+        "about_check_updates": "更新を確認",
+        "about_checking": "更新を確認中...",
+        "about_latest": "最新",
+        "about_up_to_date": "最新です",
+        "about_update_available": "更新があります",
+        "about_update_failed": "更新確認に失敗しました",
         "session_settings": "セッション設定",
         "session_settings_title": "セッション設定を編集",
         "session_settings_note": "変更は今後の録音に適用されます。",
@@ -503,6 +558,7 @@ TRANSLATIONS = {
         "pitch_algo_classic": "クラシック（自己相関）",
         "pitch_algo_yin": "新しい（YIN）",
         "note_workers": "ノート解析ワーカー数",
+        "hold_to_record": "Rキー長押しで録音（OREMO風）",
         "theme": "テーマ",
         "theme_light": "ライト",
         "theme_dark": "ダーク",
@@ -575,6 +631,8 @@ TRANSLATIONS = {
         "import_reclist_question": "既存を置換しますか？それとも追加しますか？",
         "add_entry": "追加",
         "delete_entry": "削除",
+        "delete_selected_title": "録音を削除",
+        "delete_selected_prompt": "選択した{count}件とファイルを削除しますか？",
         "alias": "エイリアス",
         "note_optional": "ノート (任意)",
     },
@@ -849,6 +907,7 @@ class UiSettingsDialog(QtWidgets.QDialog):
         current_theme_key: str,
         current_pitch_algo: str,
         current_note_workers: int,
+        current_hold_to_record: bool,
         parent: Optional[QtWidgets.QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -884,10 +943,14 @@ class UiSettingsDialog(QtWidgets.QDialog):
         if current_note_workers:
             self.note_workers_spin.setValue(int(current_note_workers))
 
+        self.hold_to_record_check = QtWidgets.QCheckBox(tr(self.lang, "hold_to_record"))
+        self.hold_to_record_check.setChecked(bool(current_hold_to_record))
+
         layout.addRow(tr(self.lang, "language"), self.lang_combo)
         layout.addRow(tr(self.lang, "theme"), self.theme_combo)
         layout.addRow(tr(self.lang, "pitch_algorithm"), self.pitch_combo)
         layout.addRow(tr(self.lang, "note_workers"), self.note_workers_spin)
+        layout.addRow(self.hold_to_record_check)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -897,12 +960,13 @@ class UiSettingsDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def get_data(self) -> tuple[str, str, str, int]:
+    def get_data(self) -> tuple[str, str, str, int, bool]:
         return (
             self.lang_combo.currentText(),
             str(self.theme_combo.currentData()),
             str(self.pitch_combo.currentData()),
             int(self.note_workers_spin.value()),
+            bool(self.hold_to_record_check.isChecked()),
         )
 
 
@@ -946,6 +1010,8 @@ class StartDialog(QtWidgets.QDialog):
         close_action = file_menu.addAction(tr(self.lang, "stop"))
         settings_menu = menubar.addMenu(tr(self.lang, "settings"))
         ui_action = settings_menu.addAction(tr(self.lang, "ui_settings"))
+        help_menu = menubar.addMenu(tr(self.lang, "help"))
+        about_action = help_menu.addAction(tr(self.lang, "about"))
         layout.setMenuBar(menubar)
 
         title = QtWidgets.QLabel(tr(self.lang, "start_title"))
@@ -1005,6 +1071,12 @@ class StartDialog(QtWidgets.QDialog):
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
 
+        about_row = QtWidgets.QHBoxLayout()
+        about_row.addStretch(1)
+        self.about_btn = QtWidgets.QPushButton(tr(self.lang, "about"))
+        about_row.addWidget(self.about_btn)
+        layout.addLayout(about_row)
+
         self.new_btn.clicked.connect(self._new_clicked)
         self.open_btn.clicked.connect(self._open_clicked)
         self.list_widget.itemDoubleClicked.connect(self._recent_clicked)
@@ -1012,6 +1084,8 @@ class StartDialog(QtWidgets.QDialog):
         open_action.triggered.connect(self._open_clicked)
         close_action.triggered.connect(self.reject)
         ui_action.triggered.connect(self._ui_clicked)
+        about_action.triggered.connect(self._about_clicked)
+        self.about_btn.clicked.connect(self._about_clicked)
 
         self.action: Optional[str] = None
         self.selected_path: Optional[str] = None
@@ -1037,9 +1111,102 @@ class StartDialog(QtWidgets.QDialog):
         self.action = "settings"
         self.accept()
 
+    def _about_clicked(self) -> None:
+        dialog = AboutDialog(self.lang, self)
+        dialog.exec()
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.closed_via_x = True
         super().closeEvent(event)
+
+
+class UpdateCheckWorker(QtCore.QThread):
+    result = QtCore.pyqtSignal(str, str)
+
+    def run(self) -> None:
+        url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            tag = str(payload.get("tag_name", "")).strip()
+            self.result.emit(tag, "")
+        except Exception as exc:
+            self.result.emit("", str(exc))
+
+
+class AboutDialog(QtWidgets.QDialog):
+    def __init__(self, lang: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self.lang = lang
+        self.setWindowTitle(tr(self.lang, "about_title"))
+        self.setMinimumWidth(420)
+        self._worker: Optional[UpdateCheckWorker] = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        title = QtWidgets.QLabel(APP_NAME)
+        title.setStyleSheet("font-size: 22px; font-weight: 700;")
+        layout.addWidget(title)
+
+        version = QtWidgets.QLabel(f"{tr(self.lang, 'about_version')}: v{APP_VERSION}")
+        layout.addWidget(version)
+
+        link_row = QtWidgets.QHBoxLayout()
+        self.github_btn = QtWidgets.QPushButton(tr(self.lang, "about_github"))
+        self.releases_btn = QtWidgets.QPushButton(tr(self.lang, "about_releases"))
+        self.youtube_btn = QtWidgets.QPushButton(tr(self.lang, "about_youtube"))
+        link_row.addWidget(self.github_btn)
+        link_row.addWidget(self.releases_btn)
+        link_row.addWidget(self.youtube_btn)
+        layout.addLayout(link_row)
+
+        self.check_btn = QtWidgets.QPushButton(tr(self.lang, "about_check_updates"))
+        self.status_label = QtWidgets.QLabel("")
+        self.status_label.setStyleSheet("color: #666666;")
+        layout.addWidget(self.check_btn)
+        layout.addWidget(self.status_label)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+        self.github_btn.clicked.connect(lambda: self._open_url(GITHUB_PROFILE_URL))
+        self.releases_btn.clicked.connect(lambda: self._open_url(GITHUB_RELEASES_URL))
+        self.youtube_btn.clicked.connect(lambda: self._open_url(YOUTUBE_URL))
+        self.check_btn.clicked.connect(self._check_updates)
+
+        if not YOUTUBE_URL:
+            self.youtube_btn.setEnabled(False)
+            self.youtube_btn.setToolTip("Set YOUTUBE_URL in app/main_window.py")
+
+    def _open_url(self, url: str) -> None:
+        if not url:
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
+
+    def _check_updates(self) -> None:
+        if self._worker and self._worker.isRunning():
+            return
+        self.status_label.setText(tr(self.lang, "about_checking"))
+        self.check_btn.setEnabled(False)
+        self._worker = UpdateCheckWorker(self)
+        self._worker.result.connect(self._on_update_result)
+        self._worker.finished.connect(lambda: self.check_btn.setEnabled(True))
+        self._worker.start()
+
+    def _on_update_result(self, tag: str, error: str) -> None:
+        if error or not tag:
+            self.status_label.setText(tr(self.lang, "about_update_failed"))
+            return
+        latest = tag.lstrip("vV")
+        if latest == APP_VERSION:
+            self.status_label.setText(f"{tr(self.lang, 'about_up_to_date')} (v{APP_VERSION})")
+        else:
+            self.status_label.setText(f"{tr(self.lang, 'about_update_available')}: {tag}")
 class BgmNoteDialog(QtWidgets.QDialog):
     def __init__(self, lang: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -1323,6 +1490,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui_theme = self.settings.value("ui_theme", "light")
         self.pitch_algo = self.settings.value("pitch_algo", "classic")
         self.note_workers = int(self.settings.value("note_workers", 2))
+        self.hold_to_record = bool(self.settings.value("hold_to_record", False))
         self.recent_sessions: list[str] = list(self.settings.value("recent_sessions", []))
         self.setWindowTitle(tr(self.ui_language, "app_title"))
         icon_path = Path(__file__).resolve().parent.parent / "icon" / "icon.ico"
@@ -1346,6 +1514,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_analysis_key: Optional[tuple] = None
         self._current_analysis_meta: Optional[tuple] = None
         self.note_progress: Optional[QtWidgets.QProgressBar] = None
+        self._hold_record_active = False
 
         self.audio = AudioEngine()
         self.audio.error.connect(self._show_error)
@@ -1403,7 +1572,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.horizontalHeader().sectionClicked.connect(self._table_header_clicked)
         splitter.addWidget(self.table)
@@ -1582,6 +1751,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_action = self.edit_menu.addAction(tr(self.ui_language, "undo"))
         self.undo_action.setShortcut(QtGui.QKeySequence.StandardKey.Undo)
 
+        self.help_menu = menu.addMenu(tr(self.ui_language, "help"))
+        self.about_action = self.help_menu.addAction(tr(self.ui_language, "about"))
+
     def _connect_actions(self) -> None:
         self.new_action.triggered.connect(self._new_session)
         self.open_action.triggered.connect(self._open_session)
@@ -1600,6 +1772,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vst_tools_action.triggered.connect(self._open_vst_tools)
         self.ui_settings_action.triggered.connect(self._open_ui_settings)
         self.undo_action.triggered.connect(self._undo)
+        self.about_action.triggered.connect(self._open_about)
 
         self.table.itemSelectionChanged.connect(self._select_item)
         self.table.itemChanged.connect(self._item_changed)
@@ -2030,24 +2203,31 @@ class MainWindow(QtWidgets.QMainWindow):
             str(self.ui_theme),
             str(self.pitch_algo),
             int(self.note_workers),
+            bool(self.hold_to_record),
             self,
         )
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
-        lang, theme, pitch_algo, note_workers = dialog.get_data()
+        lang, theme, pitch_algo, note_workers, hold_to_record = dialog.get_data()
         self.ui_language = lang
         self.ui_theme = theme
         self.pitch_algo = pitch_algo
         self.note_workers = int(note_workers)
+        self.hold_to_record = bool(hold_to_record)
         self.settings.setValue("ui_language", lang)
         self.settings.setValue("ui_theme", theme)
         self.settings.setValue("pitch_algo", pitch_algo)
         self.settings.setValue("note_workers", int(note_workers))
+        self.settings.setValue("hold_to_record", bool(hold_to_record))
         self._apply_language()
         self._apply_theme()
         self._sung_note_cache.clear()
         self._start_note_analysis()
         self._update_recorded_analysis()
+
+    def _open_about(self) -> None:
+        dialog = AboutDialog(self.ui_language, self)
+        dialog.exec()
 
     def _open_vst_tools(self) -> None:
         dialog = VstToolsDialog(self.ui_language, self.settings, self)
@@ -2215,6 +2395,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tools_menu.setTitle(tr(self.ui_language, "tools"))
         self.settings_menu.setTitle(tr(self.ui_language, "settings"))
         self.edit_menu.setTitle(tr(self.ui_language, "edit"))
+        if hasattr(self, "help_menu"):
+            self.help_menu.setTitle(tr(self.ui_language, "help"))
 
         self.new_action.setText(tr(self.ui_language, "new_session"))
         self.open_action.setText(tr(self.ui_language, "open_session"))
@@ -2233,6 +2415,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vst_tools_action.setText(tr(self.ui_language, "vst_tools"))
         self.ui_settings_action.setText(tr(self.ui_language, "ui_settings"))
         self.undo_action.setText(tr(self.ui_language, "undo"))
+        if hasattr(self, "about_action"):
+            self.about_action.setText(tr(self.ui_language, "about"))
 
         if self.current_item:
             duration = ""
@@ -2362,6 +2546,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.audio.recording:
             self.audio.stop_recording()
             self._finalize_recording()
+            self._hold_record_active = False
         elif self.audio.preview:
             self.audio.stop_bgm()
         elif self.playing:
@@ -2861,6 +3046,62 @@ class MainWindow(QtWidgets.QMainWindow):
             x = 0.0
         self._play_recorded_from(x)
 
+    def _should_handle_shortcuts(self) -> bool:
+        widget = QtWidgets.QApplication.focusWidget()
+        if widget is None:
+            return True
+        if isinstance(
+            widget,
+            (
+                QtWidgets.QLineEdit,
+                QtWidgets.QTextEdit,
+                QtWidgets.QPlainTextEdit,
+                QtWidgets.QSpinBox,
+                QtWidgets.QDoubleSpinBox,
+                QtWidgets.QComboBox,
+            ),
+        ):
+            return False
+        return True
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.isAutoRepeat():
+            super().keyPressEvent(event)
+            return
+        if not self._should_handle_shortcuts():
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        if key == QtCore.Qt.Key.Key_Space:
+            if not self.audio.recording and not self.audio.preview:
+                if self.current_item and self.current_item.wav_path:
+                    if self.selected_audio is None or getattr(self.selected_audio, "size", 0) == 0:
+                        self._analyze_selected_item()
+                    self._play_recorded_from(0.0)
+                event.accept()
+                return
+        if key == QtCore.Qt.Key.Key_R and self.hold_to_record:
+            if not self.audio.recording and not self.audio.preview:
+                self._hold_record_active = True
+                self._record()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.isAutoRepeat():
+            super().keyReleaseEvent(event)
+            return
+        key = event.key()
+        if key == QtCore.Qt.Key.Key_R and self.hold_to_record:
+            if self._hold_record_active:
+                self._hold_record_active = False
+                if self.audio.recording:
+                    self._stop()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
     def _play_recorded_from(self, start_sec: float) -> None:
         audio = self.selected_audio if self.selected_audio is not None else self.audio.get_waveform_audio()
         if audio.size == 0:
@@ -3269,7 +3510,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if action == add_action:
             self._add_entry()
         elif action == delete_action:
-            self._delete_entry()
+            self._delete_selected_entries()
         elif action == recompute_action:
             self._recompute_note_for_selection()
 
@@ -3301,6 +3542,68 @@ class MainWindow(QtWidgets.QMainWindow):
         alias = self.session.items[row].alias
         self.session.items.pop(row)
         self._log_event("delete_entry", alias)
+        self._refresh_table()
+        self._save_session()
+
+    def _selected_model_indices(self) -> list[int]:
+        if not self.session:
+            return []
+        model_rows: list[int] = []
+        selection = self.table.selectionModel()
+        if selection is None:
+            return []
+        for index in selection.selectedRows():
+            row = index.row()
+            item = self.table.item(row, 0)
+            if item is not None:
+                model_index = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            else:
+                model_index = row
+            try:
+                model_index = int(model_index)
+            except (TypeError, ValueError):
+                model_index = row
+            if 0 <= model_index < len(self.session.items):
+                model_rows.append(model_index)
+        return sorted(set(model_rows))
+
+    def _delete_selected_entries(self) -> None:
+        if not self.session:
+            return
+        indices = self._selected_model_indices()
+        if not indices:
+            return
+        count = len(indices)
+        prompt = tr(self.ui_language, "delete_selected_prompt").format(count=count)
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            tr(self.ui_language, "delete_selected_title"),
+            prompt,
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._push_undo_state()
+        for idx in sorted(indices, reverse=True):
+            if idx < 0 or idx >= len(self.session.items):
+                continue
+            item = self.session.items[idx]
+            if item.wav_path:
+                abs_path = Path(item.wav_path)
+                if not abs_path.is_absolute():
+                    abs_path = self.session.session_dir() / abs_path
+                try:
+                    abs_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                self._sung_note_cache.pop(str(abs_path), None)
+            self._log_event("delete_entry", item.alias)
+            self.session.items.pop(idx)
+        if self.current_item and self.current_item not in self.session.items:
+            self.current_item = None
+            self.selected_audio = None
+            self._clear_analysis()
         self._refresh_table()
         self._save_session()
 
