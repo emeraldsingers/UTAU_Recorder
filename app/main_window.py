@@ -2195,7 +2195,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 raw = line.strip()
                 if not raw or raw.startswith("#") or raw.startswith(";"):
                     continue
-                if "/t" in raw:
+                if "\t" in raw:
+                    alias, comment = raw.split("\t", 1)
+                elif "/t" in raw:
                     alias, comment = raw.split("/t", 1)
                 else:
                     alias, comment = raw, ""
