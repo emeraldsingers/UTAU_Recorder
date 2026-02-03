@@ -50,7 +50,7 @@ from app.voicebank_config_dialog import VoicebankConfigDialog
 logger = logging.getLogger(__name__)
 
 APP_NAME = "AsoCorder"
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.4.2"
 GITHUB_OWNER = "emeraldsingers"
 GITHUB_REPO = "UTAU_Recorder"
 GITHUB_PROFILE_URL = "https://github.com/emeraldsingers"
@@ -263,6 +263,7 @@ TRANSLATIONS = {
         "about_releases": "Releases",
         "about_check_updates": "Check for updates",
         "about_download_update": "Download update",
+        "about_downloading": "Downloading update...",
         "about_checking": "Checking for updates...",
         "about_latest": "Latest",
         "about_up_to_date": "Up to date",
@@ -475,6 +476,7 @@ TRANSLATIONS = {
         "about_releases": "Релизы",
         "about_check_updates": "Проверить обновления",
         "about_download_update": "Скачать обновление",
+        "about_downloading": "Скачиваю обновление...",
         "about_checking": "Проверяю обновления...",
         "about_latest": "Последняя",
         "about_up_to_date": "Актуальная версия",
@@ -640,6 +642,7 @@ TRANSLATIONS = {
         "about_releases": "リリース",
         "about_check_updates": "更新を確認",
         "about_download_update": "更新をダウンロード",
+        "about_downloading": "更新をダウンロード中...",
         "about_checking": "更新を確認中...",
         "about_latest": "最新",
         "about_up_to_date": "最新です",
@@ -1323,6 +1326,7 @@ class UpdateCheckWorker(QtCore.QThread):
 
 class UpdateDownloadWorker(QtCore.QThread):
     finished = QtCore.pyqtSignal(bool, str)
+    progress = QtCore.pyqtSignal(int, int)
 
     def __init__(self, url: str, out_path: Path, parent: Optional[QtCore.QObject] = None) -> None:
         super().__init__(parent)
@@ -1335,10 +1339,22 @@ class UpdateDownloadWorker(QtCore.QThread):
                 self.url,
                 headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
             )
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = resp.read()
+            tmp_path = self.out_path.with_suffix(self.out_path.suffix + ".part")
             self.out_path.parent.mkdir(parents=True, exist_ok=True)
-            self.out_path.write_bytes(data)
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                downloaded = 0
+                with tmp_path.open("wb") as f:
+                    while True:
+                        if self.isInterruptionRequested():
+                            raise RuntimeError("Download cancelled")
+                        chunk = resp.read(1024 * 64)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        self.progress.emit(downloaded, total)
+            tmp_path.replace(self.out_path)
             self.finished.emit(True, str(self.out_path))
         except Exception as exc:
             self.finished.emit(False, str(exc))
@@ -1732,6 +1748,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_update_asset_url: str = ""
         self._manual_update_worker: Optional[UpdateCheckWorker] = None
         self._hold_record_active = False
+        self._update_progress: Optional[QtWidgets.QProgressDialog] = None
 
         self.audio = AudioEngine()
         self.audio.error.connect(self._show_error)
@@ -2649,20 +2666,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._download_update(asset_url, asset_name, tag)
 
     def _download_update(self, asset_url: str, asset_name: str, tag: str) -> None:
-        suggested = asset_name or f"{APP_NAME}_{tag}.zip"
-        target, _ = QtWidgets.QFileDialog.getSaveFileName(
+        filename = asset_name or f"{APP_NAME}_{tag}.zip"
+        target = Path.cwd() / filename
+        self._update_progress = QtWidgets.QProgressDialog(
+            tr(self.ui_language, "about_downloading"),
+            tr(self.ui_language, "stop"),
+            0,
+            100,
             self,
-            tr(self.ui_language, "about_download_update"),
-            suggested,
-            "Archives (*.zip *.rar);;All Files (*)",
         )
-        if not target:
-            return
-        self._update_download_worker = UpdateDownloadWorker(asset_url, Path(target), self)
+        self._update_progress.setWindowTitle(tr(self.ui_language, "about_download_update"))
+        self._update_progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        self._update_progress.setAutoClose(False)
+        self._update_progress.setAutoReset(False)
+
+        self._update_download_worker = UpdateDownloadWorker(asset_url, target, self)
+        self._update_download_worker.progress.connect(self._on_update_download_progress)
         self._update_download_worker.finished.connect(self._on_auto_download_done)
+        self._update_progress.canceled.connect(self._update_download_worker.requestInterruption)
         self._update_download_worker.start()
 
     def _on_auto_download_done(self, ok: bool, info: str) -> None:
+        if hasattr(self, "_update_progress") and self._update_progress:
+            self._update_progress.close()
+            self._update_progress = None
         if not ok:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -2671,12 +2698,16 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
         path = Path(info)
+        if path.suffix.lower() == ".rar":
+            QtWidgets.QMessageBox.warning(
+                self,
+                tr(self.ui_language, "about_download_update"),
+                tr(self.ui_language, "about_extract_failed"),
+            )
+            return
         if path.suffix.lower() == ".zip":
             try:
-                extract_dir = path.with_suffix("")
-                extract_dir.mkdir(parents=True, exist_ok=True)
-                with zipfile.ZipFile(path, "r") as zf:
-                    zf.extractall(extract_dir)
+                self._apply_update_zip(path)
             except Exception:
                 QtWidgets.QMessageBox.warning(
                     self,
@@ -2689,6 +2720,63 @@ class MainWindow(QtWidgets.QMainWindow):
             tr(self.ui_language, "about_download_update"),
             tr(self.ui_language, "about_restart_required"),
         )
+
+    def _on_update_download_progress(self, downloaded: int, total: int) -> None:
+        if not hasattr(self, "_update_progress") or not self._update_progress:
+            return
+        if total > 0:
+            self._update_progress.setMaximum(total)
+            self._update_progress.setValue(downloaded)
+        else:
+            self._update_progress.setRange(0, 0)
+
+    def _apply_update_zip(self, zip_path: Path) -> None:
+        base_dir = Path.cwd()
+        temp_dir = base_dir / "_update_tmp"
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(temp_dir)
+
+        entries = [p for p in temp_dir.iterdir()]
+        if len(entries) == 1 and entries[0].is_dir():
+            src_root = entries[0]
+        else:
+            src_root = temp_dir
+
+        files = [p for p in src_root.rglob("*")]
+        progress = QtWidgets.QProgressDialog(
+            tr(self.ui_language, "about_extracting"),
+            None,
+            0,
+            len(files),
+            self,
+        )
+        progress.setWindowTitle(tr(self.ui_language, "about_download_update"))
+        progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        progress.setAutoClose(True)
+        progress.show()
+
+        count = 0
+        for src in src_root.rglob("*"):
+            rel = src.relative_to(src_root)
+            dst = base_dir / rel
+            if src.is_dir():
+                dst.mkdir(parents=True, exist_ok=True)
+                count += 1
+                progress.setValue(count)
+                QtWidgets.QApplication.processEvents()
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            count += 1
+            progress.setValue(count)
+            QtWidgets.QApplication.processEvents()
+
+        progress.close()
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _open_vst_tools(self) -> None:
         dialog = VstToolsDialog(self.ui_language, self.settings, self)
